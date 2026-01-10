@@ -6,7 +6,7 @@ pub mod lsh;
 pub mod harmonic;
 
 pub use lsh::{LshEmbedder, Vocabulary};
-pub use harmonic::{HarmonicBdh, generate_brainwave};
+pub use harmonic::{HarmonicBdh, BiologicalConfig, generate_brainwave};
 
 /// Helper: Layer normalization that handles zero-vectors safely.
 fn layer_norm(x: &Array1<f32>) -> Array1<f32> {
