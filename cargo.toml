@@ -9,3 +9,11 @@ ndarray-rand = "0.14.0"
 rand = { version = "0.8.5", features = ["std_rng"] }
 num-complex = "0.4"
 rustfft = "6.2"  # For FFT-based signal analysis
+clap = { version = "4.4", features = ["derive"] }  # CLI args
+tokenizers = "0.19"  # BPE tokenization
+reqwest = { version = "0.11", features = ["blocking", "json"] }  # HTTP for data download
+flate2 = "1.0"  # Gzip decompression
+walkdir = "2.4"  # Directory traversal
+indicatif = "0.17"  # Progress bars
+serde_json = "1.0"  # JSON parsing
+urlencoding = "2.1"  # URL encoding

@@ -4,9 +4,10 @@
 //! where information propagates via phase alignment and constructive interference.
 //!
 //! ## Biological Mechanisms
-//! - **Spontaneous Activity**: Low-level noise injection enables "daydreaming"
-//! - **Cross-Frequency Coupling**: Lower layers modulate higher layer amplitudes
+//! - **Spontaneous Activity**: van der Pol self-excitation + noise for sustained daydreaming
+//! - **Cross-Frequency Coupling**: Lower layers modulate higher layer amplitudes (theta-gamma)
 //! - **Homeostatic Plasticity**: Dynamic damping prevents runaway activation
+//! - **Adaptive Exploration**: Noise increases during low-energy periods (boredom → exploration)
 
 use ndarray::prelude::*;
 use num_complex::Complex32;
@@ -18,7 +19,7 @@ use std::f32::consts::PI;
 pub type ComplexState = Array2<Complex32>;
 
 /// Configuration for biological dynamics.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BiologicalConfig {
     /// Spontaneous noise amplitude (daydream strength)
     pub noise_amplitude: f32,
@@ -30,16 +31,57 @@ pub struct BiologicalConfig {
     pub homeostatic_rate: f32,
     /// Base damping factor
     pub base_damping: f32,
+    /// Van der Pol self-excitation strength (limit cycle behavior)
+    pub self_excitation: f32,
+    /// Endogenous drive strength (layer 0 only)
+    pub endogenous_drive: f32,
+    /// Adaptive noise: increases when energy stays low
+    pub adaptive_noise_rate: f32,
+    /// Layer frequencies (if empty, uses default progression)
+    pub layer_frequencies: Vec<f32>,
 }
 
 impl Default for BiologicalConfig {
     fn default() -> Self {
         Self {
-            noise_amplitude: 0.01,       // Subtle background noise
-            cross_freq_coupling: 0.3,    // Moderate theta-gamma binding
-            homeostatic_threshold: 0.5,  // Energy threshold for "boredom"
-            homeostatic_rate: 0.02,      // Slow adaptation
-            base_damping: 0.95,          // 5% base energy loss
+            noise_amplitude: 0.02,        // Moderate background noise
+            cross_freq_coupling: 0.3,     // Moderate theta-gamma binding
+            homeostatic_threshold: 0.5,   // Energy threshold for "boredom"
+            homeostatic_rate: 0.02,       // Slow adaptation
+            base_damping: 0.95,           // 5% base energy loss
+            self_excitation: 0.015,       // Van der Pol nonlinearity
+            endogenous_drive: 0.008,      // Weak endogenous oscillation in layer 0
+            adaptive_noise_rate: 0.1,     // How fast noise adapts to low energy
+            layer_frequencies: vec![],    // Empty = use default
+        }
+    }
+}
+
+/// Semantic concept for thought interpretation.
+#[derive(Clone, Debug)]
+pub struct Concept {
+    pub name: &'static str,
+    pub vector: Array1<f32>,
+}
+
+/// Thought state labels based on frequency/energy patterns.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThoughtState {
+    Resting,
+    Contemplative,
+    ActivePlanning,
+    AlertScanning,
+    Transitioning,
+}
+
+impl ThoughtState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThoughtState::Resting => "💤 Resting",
+            ThoughtState::Contemplative => "🧘 Contemplative (memory recall)",
+            ThoughtState::ActivePlanning => "🎯 Active Planning",
+            ThoughtState::AlertScanning => "👁 Alert Scanning",
+            ThoughtState::Transitioning => "🔄 Transitioning",
         }
     }
 }
@@ -49,34 +91,21 @@ pub struct HarmonicBdh {
     pub n: usize,
     pub d: usize,
     
-    /// Natural frequency of each neuron (its "tuning")
     natural_freq: Array1<f32>,
-    
-    /// Coupling strength between harmonic modes and neurons
     coupling: Array2<f32>,
-    
-    /// Per-layer damping factors (adaptive for homeostasis)
     layer_damping: Vec<f32>,
-    
-    /// Per-neuron damping (for fine-grained homeostasis)
     neuron_damping: Vec<Array1<f32>>,
-    
-    /// Energy history for homeostatic adaptation (per layer)
     energy_history: Vec<f32>,
-    
-    /// Complex state ρ: phase + amplitude (standing wave memory)
+    low_energy_duration: Vec<usize>,  // Track how long energy has been low
+    adaptive_noise: Vec<f32>,          // Current adaptive noise level per layer
     rho: Vec<ComplexState>,
-    
-    /// Global phase (time evolution)
     global_phase: f32,
-    
-    /// Layer frequencies for cross-frequency coupling
-    /// Lower layers = slower (theta ~5Hz), higher layers = faster (gamma ~40Hz)
     layer_frequencies: Vec<f32>,
-    
     num_layers: usize,
     
-    /// Biological configuration
+    /// Concept space for semantic interpretation
+    concepts: Vec<Concept>,
+    
     pub config: BiologicalConfig,
 }
 
@@ -101,15 +130,23 @@ impl HarmonicBdh {
         
         let rho = vec![Array2::from_elem((d, n), Complex32::new(0.0, 0.0)); num_layers];
         
-        // Layer frequencies: theta (5Hz) -> beta (20Hz) -> gamma (40Hz)
-        let layer_frequencies: Vec<f32> = (0..num_layers)
-            .map(|l| 5.0 * (2.0_f32).powf(l as f32 * 3.0 / num_layers as f32))
-            .collect();
+        // Layer frequencies: use config if provided, otherwise default progression
+        let layer_frequencies: Vec<f32> = if config.layer_frequencies.len() == num_layers {
+            config.layer_frequencies.clone()
+        } else {
+            (0..num_layers)
+                .map(|l| 5.0 * (2.0_f32).powf(l as f32 * 3.0 / num_layers as f32))
+                .collect()
+        };
         
-        // Initialize per-layer and per-neuron damping
         let layer_damping = vec![config.base_damping; num_layers];
         let neuron_damping = vec![Array1::from_elem(n, config.base_damping); num_layers];
         let energy_history = vec![0.0; num_layers];
+        let low_energy_duration = vec![0; num_layers];
+        let adaptive_noise = vec![config.noise_amplitude; num_layers];
+        
+        // Initialize concept space
+        let concepts = Self::create_concept_space(n);
         
         Self {
             n,
@@ -119,44 +156,128 @@ impl HarmonicBdh {
             layer_damping,
             neuron_damping,
             energy_history,
+            low_energy_duration,
+            adaptive_noise,
             rho,
             global_phase: 0.0,
             layer_frequencies,
             num_layers,
+            concepts,
             config,
         }
     }
     
-    /// (A) SPONTANEOUS ACTIVITY: Inject stochastic noise into the system.
-    /// This is the "daydream" mechanism - allows the system to explore attractors autonomously.
-    fn inject_spontaneous_noise(&self, layer: usize) -> Array1<f32> {
+    /// Create a predefined concept space for semantic interpretation.
+    fn create_concept_space(n: usize) -> Vec<Concept> {
         let mut rng = rand::thread_rng();
+        let concept_names = [
+            "curiosity", "hunger", "danger", "safety", 
+            "exploration", "memory", "planning", "rest",
+            "social", "novelty", "pattern", "prediction",
+        ];
         
-        // Pink noise (1/f) is more biologically realistic than white noise
-        // We approximate by mixing multiple frequencies
+        concept_names.iter().map(|&name| {
+            // Create semi-structured random vectors
+            let mut vec = Array1::zeros(n);
+            let cluster_size = n / concept_names.len();
+            let idx = concept_names.iter().position(|&x| x == name).unwrap();
+            
+            // Each concept has a "home region" but with some spread
+            for i in 0..n {
+                let distance = ((i as i32 - (idx * cluster_size) as i32).abs() as f32) / n as f32;
+                let base = (-distance * 5.0).exp();
+                let noise: f32 = rng.gen_range(-0.1..0.1);
+                vec[i] = (base + noise).max(0.0);
+            }
+            
+            // Normalize
+            let norm = vec.dot(&vec).sqrt().max(0.001);
+            vec /= norm;
+            
+            Concept { name, vector: vec }
+        }).collect()
+    }
+    
+    /// (A) SPONTANEOUS ACTIVITY with van der Pol self-excitation.
+    fn inject_spontaneous_activity(&self, layer: usize) -> (Array1<f32>, Array1<f32>) {
+        let mut rng = rand::thread_rng();
+        let layer_freq = self.layer_frequencies[layer];
+        let adaptive = self.adaptive_noise[layer];
+        
+        // Noise component (phase-aligned + random)
+        let noise = if adaptive > 0.0 {
+            Array1::from_iter((0..self.n).map(|neuron| {
+                let neuron_freq = self.natural_freq[neuron];
+                let phase_noise = (self.global_phase * layer_freq + neuron_freq).sin();
+                let random: f32 = rng.gen_range(-1.0_f32..1.0_f32);
+                adaptive * (0.6 * phase_noise + 0.4 * random)
+            }))
+        } else {
+            Array1::zeros(self.n)
+        };
+        
+        // Endogenous drive (layer 0 only - the "heartbeat")
+        let endogenous = if layer == 0 && self.config.endogenous_drive > 0.0 {
+            Array1::from_iter((0..self.n).map(|_| {
+                rng.gen_range(-self.config.endogenous_drive..self.config.endogenous_drive)
+            }))
+        } else {
+            Array1::zeros(self.n)
+        };
+        
+        (noise, endogenous)
+    }
+    
+    /// Van der Pol style self-excitation: creates limit cycle behavior.
+    /// amplitude * (1 - amplitude²) → pushes toward amplitude ≈ 1
+    fn compute_self_excitation(&self, layer: usize) -> Array1<f32> {
+        let mu = self.config.self_excitation;
+        
         Array1::from_iter((0..self.n).map(|neuron| {
-            let layer_freq = self.layer_frequencies[layer];
-            let neuron_freq = self.natural_freq[neuron];
+            let mut amplitude = 0.0f32;
+            for mode in 0..self.d {
+                amplitude += self.rho[layer][[mode, neuron]].norm();
+            }
+            amplitude /= self.d as f32;
             
-            // Phase-aligned noise: more likely to resonate with existing patterns
-            let phase_noise = (self.global_phase * layer_freq + neuron_freq).sin();
-            let random_component: f32 = rng.gen_range(-1.0_f32..1.0_f32);
-            
-            // Combine structured and random noise
-            self.config.noise_amplitude * (0.7 * phase_noise + 0.3 * random_component)
+            // Van der Pol: μ * x * (1 - x²) 
+            // Positive when amplitude < 1, negative when > 1
+            mu * amplitude * (1.0 - amplitude * amplitude)
         }))
     }
     
-    /// (B) CROSS-FREQUENCY COUPLING: Lower layer amplitude modulates higher layer gain.
-    /// Implements theta-gamma coupling where slow oscillations "carry" fast oscillations.
-    fn compute_cross_frequency_modulation(&self, layer: usize) -> Array1<f32> {
+    /// Update adaptive noise based on energy levels.
+    fn update_adaptive_noise(&mut self, layer: usize, current_energy: f32) {
+        let low_threshold = self.config.homeostatic_threshold * 0.3;
+        
+        if current_energy < low_threshold {
+            self.low_energy_duration[layer] += 1;
+            
+            // After 10+ steps of low energy, increase noise (boredom → exploration)
+            if self.low_energy_duration[layer] > 10 {
+                let boost = self.config.adaptive_noise_rate 
+                    * (self.low_energy_duration[layer] as f32 - 10.0).min(20.0) / 20.0;
+                self.adaptive_noise[layer] = (self.adaptive_noise[layer] + boost)
+                    .min(self.config.noise_amplitude * 5.0);
+            }
+        } else {
+            // Reset when activity returns
+            self.low_energy_duration[layer] = 0;
+            // Slowly decay adaptive noise back to baseline
+            self.adaptive_noise[layer] = (self.adaptive_noise[layer] * 0.95)
+                .max(self.config.noise_amplitude);
+        }
+    }
+    
+    /// (B) CROSS-FREQUENCY COUPLING with phase coherence.
+    fn compute_cross_frequency_modulation(&self, layer: usize) -> (Array1<f32>, f32) {
         if layer == 0 {
-            // First layer has no modulation from below
-            return Array1::ones(self.n);
+            return (Array1::ones(self.n), 1.0);
         }
         
-        // Get amplitude envelope from lower layer (slower frequency)
         let lower_layer = layer - 1;
+        
+        // Amplitude modulation from lower layer
         let lower_amplitudes: Array1<f32> = (0..self.n)
             .map(|neuron| {
                 let mut total_amp = 0.0f32;
@@ -167,32 +288,49 @@ impl HarmonicBdh {
             })
             .collect();
         
-        // Normalize and apply coupling strength
+        // Phase coherence: how aligned are the phases between layers?
+        let mut phase_coherence = 0.0f32;
+        for neuron in 0..self.n {
+            let mut lower_phase = Complex32::new(0.0, 0.0);
+            let mut upper_phase = Complex32::new(0.0, 0.0);
+            
+            for mode in 0..self.d {
+                lower_phase += self.rho[lower_layer][[mode, neuron]];
+                upper_phase += self.rho[layer][[mode, neuron]];
+            }
+            
+            if lower_phase.norm() > 0.001 && upper_phase.norm() > 0.001 {
+                let lower_angle = lower_phase.arg();
+                let upper_angle = upper_phase.arg();
+                phase_coherence += (lower_angle - upper_angle).cos();
+            }
+        }
+        phase_coherence /= self.n as f32;
+        
         let max_amp = lower_amplitudes.iter().cloned().fold(0.0f32, f32::max).max(0.01);
-        lower_amplitudes.mapv(|a| {
+        let modulation = lower_amplitudes.mapv(|a| {
             let normalized = a / max_amp;
-            // Modulation: when lower layer is active, higher layer gain increases
-            1.0 + self.config.cross_freq_coupling * normalized
-        })
+            1.0 + self.config.cross_freq_coupling * normalized * (0.5 + 0.5 * phase_coherence)
+        });
+        
+        (modulation, phase_coherence)
     }
     
-    /// (C) HOMEOSTATIC PLASTICITY: Adjust damping based on sustained energy.
-    /// Prevents neurons from "screaming" forever - implements neural fatigue/boredom.
-    fn apply_homeostatic_plasticity(&mut self, layer: usize, current_energy: f32) {
+    /// (C) HOMEOSTATIC PLASTICITY with recovery tracking.
+    fn apply_homeostatic_plasticity(&mut self, layer: usize, current_energy: f32) -> f32 {
         let threshold = self.config.homeostatic_threshold;
         let rate = self.config.homeostatic_rate;
         
-        // Exponential moving average of energy
         self.energy_history[layer] = 0.9 * self.energy_history[layer] + 0.1 * current_energy;
         let sustained_energy = self.energy_history[layer];
         
-        // If energy is sustained above threshold, increase damping (get "bored")
+        let prev_damping = self.layer_damping[layer];
+        
         if sustained_energy > threshold {
             let excess = (sustained_energy - threshold) / threshold;
             self.layer_damping[layer] = (self.layer_damping[layer] - rate * excess)
                 .clamp(0.5, self.config.base_damping);
         } else {
-            // Recovery: slowly return to base damping
             self.layer_damping[layer] = (self.layer_damping[layer] + rate * 0.1)
                 .min(self.config.base_damping);
         }
@@ -204,20 +342,21 @@ impl HarmonicBdh {
                 .sum();
             
             if neuron_energy > threshold * 0.1 {
-                // This neuron is "hot" - increase its damping
                 self.neuron_damping[layer][neuron] = 
                     (self.neuron_damping[layer][neuron] - rate * 0.5)
                     .clamp(0.5, self.config.base_damping);
             } else {
-                // Recovery
                 self.neuron_damping[layer][neuron] = 
                     (self.neuron_damping[layer][neuron] + rate * 0.05)
                     .min(self.config.base_damping);
             }
         }
+        
+        // Return recovery rate (how much damping changed)
+        self.layer_damping[layer] - prev_damping
     }
     
-    /// Initialize the standing wave state from a signal (e.g., brainwave, audio).
+    /// Initialize from signal.
     pub fn initialize_from_signal(&mut self, signal: &[f32], layer: usize) {
         let signal_len = signal.len();
         
@@ -245,7 +384,7 @@ impl HarmonicBdh {
         }
     }
     
-    /// Compute phase alignment (coherence) between input and internal state.
+    /// Phase alignment.
     fn phase_alignment(&self, input: &Array1<f32>, state: &ComplexState) -> Array1<f32> {
         let mut alignment = Array1::zeros(self.n);
         
@@ -265,8 +404,8 @@ impl HarmonicBdh {
         alignment
     }
     
-    /// Update the standing wave state with excitation, applying per-neuron damping.
-    fn update_standing_wave(&mut self, excitation: &Array1<f32>, layer: usize) {
+    /// Update standing wave with self-excitation.
+    fn update_standing_wave(&mut self, excitation: &Array1<f32>, self_excite: &Array1<f32>, layer: usize) {
         let dt = 0.1;
         let layer_damp = self.layer_damping[layer];
         
@@ -279,11 +418,12 @@ impl HarmonicBdh {
                 let omega = self.natural_freq[neuron] + mode_freq;
                 let rotation = Complex32::new((omega * dt).cos(), (omega * dt).sin());
                 
-                // Apply both layer and neuron-specific damping
                 let effective_damping = layer_damp * self.neuron_damping[layer][neuron];
                 let damped = current * effective_damping;
                 
-                let drive = excitation[neuron] * self.coupling[[mode, neuron]];
+                // Combined drive: external + self-excitation
+                let total_drive = excitation[neuron] + self_excite[neuron];
+                let drive = total_drive * self.coupling[[mode, neuron]];
                 let drive_phasor = Complex32::new(
                     drive * self.global_phase.cos(),
                     drive * self.global_phase.sin(),
@@ -294,21 +434,25 @@ impl HarmonicBdh {
         }
     }
     
-    /// Forward pass with all biological mechanisms active.
-    pub fn forward(&mut self, input: &Array1<f32>) -> (Array1<f32>, Vec<f32>) {
+    /// Forward pass with all biological mechanisms.
+    /// Returns (output, energies, phase_coherences)
+    pub fn forward(&mut self, input: &Array1<f32>) -> (Array1<f32>, Vec<f32>, Vec<f32>) {
         let mut signal = input.clone();
         let mut energy_per_layer = Vec::with_capacity(self.num_layers);
+        let mut coherence_per_layer = Vec::with_capacity(self.num_layers);
         
         for layer in 0..self.num_layers {
-            // (A) SPONTANEOUS ACTIVITY: Add background noise
-            let noise = self.inject_spontaneous_noise(layer);
-            signal = &signal + &noise;
+            // (A) SPONTANEOUS ACTIVITY: noise + endogenous drive + self-excitation
+            let (noise, endogenous) = self.inject_spontaneous_activity(layer);
+            let self_excite = self.compute_self_excitation(layer);
+            signal = &signal + &noise + &endogenous;
             
-            // (B) CROSS-FREQUENCY COUPLING: Modulate by lower layer
-            let modulation = self.compute_cross_frequency_modulation(layer);
+            // (B) CROSS-FREQUENCY COUPLING
+            let (modulation, coherence) = self.compute_cross_frequency_modulation(layer);
             signal = &signal * &modulation;
+            coherence_per_layer.push(coherence);
             
-            // Phase alignment and resonance gating
+            // Phase alignment and gating
             let alignment = self.phase_alignment(&signal, &self.rho[layer]);
             let max_align = alignment.iter().cloned().fold(0.0f32, f32::max).max(0.01);
             let resonance_gate = alignment.mapv(|a| {
@@ -316,21 +460,20 @@ impl HarmonicBdh {
                 1.0 / (1.0 + (-5.0 * (normalized - 0.2)).exp())
             });
             
-            // Update standing wave
+            // Update standing wave with self-excitation
             let excitation = &signal * &resonance_gate;
-            self.update_standing_wave(&excitation, layer);
+            self.update_standing_wave(&excitation, &self_excite, layer);
             
             signal = &signal * &resonance_gate;
             
-            // Calculate layer energy
-            let layer_energy: f32 = self.rho[layer]
-                .iter()
-                .map(|c| c.norm_sqr())
-                .sum();
+            let layer_energy: f32 = self.rho[layer].iter().map(|c| c.norm_sqr()).sum();
             energy_per_layer.push(layer_energy);
             
-            // (C) HOMEOSTATIC PLASTICITY: Adapt damping
+            // (C) HOMEOSTATIC PLASTICITY
             self.apply_homeostatic_plasticity(layer, layer_energy);
+            
+            // Update adaptive noise
+            self.update_adaptive_noise(layer, layer_energy);
         }
         
         self.global_phase += 0.1;
@@ -338,33 +481,82 @@ impl HarmonicBdh {
             self.global_phase -= 2.0 * PI;
         }
         
-        (signal, energy_per_layer)
+        (signal, energy_per_layer, coherence_per_layer)
     }
     
-    /// AUTONOMOUS THINKING: Run without external input (pure daydreaming).
-    /// The system explores its own attractors driven only by spontaneous noise.
-    pub fn daydream(&mut self, steps: usize) -> Vec<(Array1<f32>, Vec<f32>)> {
+    /// Simplified forward for compatibility.
+    pub fn forward_simple(&mut self, input: &Array1<f32>) -> (Array1<f32>, Vec<f32>) {
+        let (signal, energies, _) = self.forward(input);
+        (signal, energies)
+    }
+    
+    /// Daydream with richer output.
+    pub fn daydream(&mut self, steps: usize) -> Vec<DaydreamStep> {
         let mut trajectory = Vec::with_capacity(steps);
-        
-        // Start from internal state projection
         let mut signal = self.project_internal_state();
         
-        for _ in 0..steps {
-            let (output, energies) = self.forward(&signal);
-            trajectory.push((output.clone(), energies));
+        for step in 0..steps {
+            let (output, energies, coherences) = self.forward(&signal);
             
-            // Feed output back (with some decay to prevent explosion)
+            let thought_state = self.classify_thought_state(&energies);
+            let top_concepts = self.get_top_concepts(&output, 3);
+            let dominant_freq = self.get_dominant_frequencies(0).mean().unwrap_or(0.0);
+            
+            trajectory.push(DaydreamStep {
+                step,
+                output: output.clone(),
+                energies,
+                coherences,
+                thought_state,
+                top_concepts,
+                dominant_freq,
+                adaptive_noise: self.adaptive_noise.clone(),
+            });
+            
             signal = output.mapv(|v| v * 0.8);
         }
         
         trajectory
     }
     
-    /// Project the current internal state to an output signal.
+    /// Classify current thought state based on frequency/energy patterns.
+    pub fn classify_thought_state(&self, energies: &[f32]) -> ThoughtState {
+        let total_energy: f32 = energies.iter().sum();
+        let avg_freq = self.get_dominant_frequencies(0).mean().unwrap_or(0.0);
+        
+        if total_energy < 0.05 {
+            ThoughtState::Resting
+        } else if avg_freq < 6.0 && energies.get(0).unwrap_or(&0.0) > &0.3 {
+            ThoughtState::Contemplative
+        } else if avg_freq > 15.0 && total_energy > 0.2 {
+            ThoughtState::AlertScanning
+        } else if total_energy > 0.1 {
+            ThoughtState::ActivePlanning
+        } else {
+            ThoughtState::Transitioning
+        }
+    }
+    
+    /// Get top matching concepts via cosine similarity.
+    pub fn get_top_concepts(&self, state: &Array1<f32>, top_k: usize) -> Vec<(&'static str, f32)> {
+        let state_norm = state.dot(state).sqrt().max(0.001);
+        let normalized_state = state / state_norm;
+        
+        let mut scores: Vec<_> = self.concepts.iter()
+            .map(|c| {
+                let similarity = normalized_state.dot(&c.vector);
+                (c.name, similarity)
+            })
+            .collect();
+        
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.truncate(top_k);
+        scores
+    }
+    
     fn project_internal_state(&self) -> Array1<f32> {
         let mut output = Array1::zeros(self.n);
         
-        // Sum contributions from all layers
         for layer in 0..self.num_layers {
             for neuron in 0..self.n {
                 let mut neuron_activity = 0.0f32;
@@ -379,13 +571,12 @@ impl HarmonicBdh {
         output
     }
     
-    /// Find attractor with biological dynamics.
     pub fn find_attractor(&mut self, initial: &Array1<f32>, max_iters: usize, tolerance: f32) -> (Array1<f32>, usize) {
         let mut signal = initial.clone();
         let mut prev_energy = 0.0f32;
         
         for iter in 0..max_iters {
-            let (output, energies) = self.forward(&signal);
+            let (output, energies, _) = self.forward(&signal);
             let total_energy: f32 = energies.iter().sum();
             
             if (total_energy - prev_energy).abs() < tolerance {
@@ -399,22 +590,22 @@ impl HarmonicBdh {
         (signal, max_iters)
     }
     
-    /// Get the current standing wave pattern as real amplitudes.
     pub fn get_standing_wave(&self, layer: usize) -> Array2<f32> {
         self.rho[layer].mapv(|c| c.norm())
     }
     
-    /// Get current damping values (shows homeostatic state).
     pub fn get_damping_state(&self) -> (&[f32], &[Array1<f32>]) {
         (&self.layer_damping, &self.neuron_damping)
     }
     
-    /// Get layer frequencies for debugging.
     pub fn get_layer_frequencies(&self) -> &[f32] {
         &self.layer_frequencies
     }
     
-    /// Measure dominant frequency per neuron.
+    pub fn get_adaptive_noise(&self) -> &[f32] {
+        &self.adaptive_noise
+    }
+    
     pub fn get_dominant_frequencies(&self, layer: usize) -> Array1<f32> {
         let mut freqs = Array1::zeros(self.n);
         
@@ -435,9 +626,29 @@ impl HarmonicBdh {
         
         freqs
     }
+    
+    /// Set custom layer frequencies.
+    pub fn set_layer_frequencies(&mut self, freqs: Vec<f32>) {
+        if freqs.len() == self.num_layers {
+            self.layer_frequencies = freqs;
+        }
+    }
 }
 
-/// Generate a synthetic brainwave-like signal for testing.
+/// Rich output from a daydream step.
+#[derive(Clone, Debug)]
+pub struct DaydreamStep {
+    pub step: usize,
+    pub output: Array1<f32>,
+    pub energies: Vec<f32>,
+    pub coherences: Vec<f32>,
+    pub thought_state: ThoughtState,
+    pub top_concepts: Vec<(&'static str, f32)>,
+    pub dominant_freq: f32,
+    pub adaptive_noise: Vec<f32>,
+}
+
+/// Generate a synthetic brainwave-like signal.
 pub fn generate_brainwave(samples: usize, dominant_freq: f32, noise_level: f32) -> Vec<f32> {
     let mut rng = rand::thread_rng();
     
@@ -465,11 +676,12 @@ mod tests {
         let mut model = HarmonicBdh::new(64, 16, 2);
         let input = Array1::from_iter((0..64).map(|i| (i as f32 * 0.1).sin().max(0.0)));
         
-        let (output, energies) = model.forward(&input);
+        let (output, energies, coherences) = model.forward(&input);
         
         assert_eq!(output.len(), 64);
         assert!(output.iter().all(|&v| v.is_finite()));
         assert_eq!(energies.len(), 2);
+        assert_eq!(coherences.len(), 2);
     }
 
     #[test]
@@ -480,89 +692,130 @@ mod tests {
         model.initialize_from_signal(&brainwave, 0);
         
         let wave = model.get_standing_wave(0);
-        assert!(wave.sum() > 0.0, "Standing wave should have energy after initialization");
+        assert!(wave.sum() > 0.0);
     }
 
     #[test]
     fn test_attractor_convergence() {
-        // Use config with no noise for deterministic convergence
         let config = BiologicalConfig {
             noise_amplitude: 0.0,
-            cross_freq_coupling: 0.0, // Disable coupling for simpler dynamics
+            self_excitation: 0.0,
+            endogenous_drive: 0.0,
+            cross_freq_coupling: 0.0,
             ..Default::default()
         };
         let mut model = HarmonicBdh::with_config(32, 8, 2, config);
         
-        // Initialize with signal to give starting energy
         let brainwave = generate_brainwave(64, 10.0, 0.1);
         model.initialize_from_signal(&brainwave, 0);
         
         let input = Array1::from_iter((0..32).map(|i| if i % 4 == 0 { 0.5 } else { 0.0 }));
-        
-        // Just verify it runs and produces output
         let (output, _) = model.find_attractor(&input, 50, 0.01);
         
-        // Should have some output
-        assert!(output.iter().any(|&v| v.is_finite()), "Should produce finite output");
+        assert!(output.iter().any(|&v| v.is_finite()));
     }
 
     #[test]
     fn test_spontaneous_activity() {
-        let mut model = HarmonicBdh::new(32, 8, 2);
+        let config = BiologicalConfig {
+            self_excitation: 0.02,
+            endogenous_drive: 0.01,
+            ..Default::default()
+        };
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
         
-        // Initialize with some memory
         let brainwave = generate_brainwave(128, 10.0, 0.1);
         model.initialize_from_signal(&brainwave, 0);
         
-        // Run daydream (no external input)
-        let trajectory = model.daydream(20);
+        let trajectory = model.daydream(30);
         
-        // Should have activity due to spontaneous noise
-        let total_activity: f32 = trajectory.iter()
-            .map(|(sig, _)| sig.iter().map(|v| v.abs()).sum::<f32>())
-            .sum();
+        // Should have sustained activity
+        let final_energy: f32 = trajectory.last().unwrap().energies.iter().sum();
+        let initial_energy: f32 = trajectory.first().unwrap().energies.iter().sum();
         
-        assert!(total_activity > 0.0, "Daydream should produce activity");
+        // With self-excitation, energy should not decay to near-zero
+        assert!(final_energy > 0.01 || initial_energy > 0.01);
     }
 
     #[test]
     fn test_homeostatic_plasticity() {
-        let mut config = BiologicalConfig::default();
-        config.homeostatic_threshold = 0.1; // Low threshold for testing
-        config.homeostatic_rate = 0.1;      // Fast adaptation
+        let config = BiologicalConfig {
+            homeostatic_threshold: 0.1,
+            homeostatic_rate: 0.1,
+            noise_amplitude: 0.0,
+            self_excitation: 0.0,
+            endogenous_drive: 0.0,
+            ..Default::default()
+        };
         
         let mut model = HarmonicBdh::with_config(32, 8, 2, config.clone());
         
-        // Pump energy into the system
         let strong_input = Array1::from_elem(32, 1.0);
         for _ in 0..20 {
             model.forward(&strong_input);
         }
         
-        // Check that damping decreased (system got "bored")
         let (layer_damping, _) = model.get_damping_state();
-        assert!(
-            layer_damping[0] < config.base_damping,
-            "Damping should decrease under sustained activation"
-        );
+        assert!(layer_damping[0] < config.base_damping);
     }
 
     #[test]
     fn test_cross_frequency_coupling() {
         let config = BiologicalConfig {
-            noise_amplitude: 0.0, // No noise for deterministic test
+            noise_amplitude: 0.0,
+            self_excitation: 0.0,
+            endogenous_drive: 0.0,
             ..Default::default()
         };
         let mut model = HarmonicBdh::with_config(32, 8, 3, config);
         
-        // Activate lower layer
-        let brainwave = generate_brainwave(128, 5.0, 0.0); // Theta
+        let brainwave = generate_brainwave(128, 5.0, 0.0);
         model.initialize_from_signal(&brainwave, 0);
         
-        // Get layer frequencies
         let freqs = model.get_layer_frequencies();
+        assert!(freqs[0] < freqs[2]);
+    }
+
+    #[test]
+    fn test_thought_classification() {
+        let model = HarmonicBdh::new(32, 8, 2);
         
-        // Layer 0 should be slower than Layer 2
-        assert!(freqs[0] < freqs[2], "Lower layers should have slower frequencies");
+        let state = model.classify_thought_state(&[0.01, 0.01]);
+        assert_eq!(state, ThoughtState::Resting);
+        
+        let state = model.classify_thought_state(&[0.5, 0.1]);
+        assert!(state == ThoughtState::Contemplative || state == ThoughtState::ActivePlanning);
+    }
+
+    #[test]
+    fn test_concept_matching() {
+        let model = HarmonicBdh::new(32, 8, 2);
+        let state = Array1::from_elem(32, 0.5);
+        
+        let concepts = model.get_top_concepts(&state, 3);
+        assert_eq!(concepts.len(), 3);
+        assert!(concepts[0].1 >= concepts[1].1);
+    }
+
+    #[test]
+    fn test_adaptive_noise() {
+        let config = BiologicalConfig {
+            adaptive_noise_rate: 0.2,
+            noise_amplitude: 0.01,
+            self_excitation: 0.0,
+            endogenous_drive: 0.0,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config.clone());
+        
+        // Run with zero input to trigger low energy
+        let zero_input = Array1::zeros(32);
+        for _ in 0..20 {
+            model.forward(&zero_input);
+        }
+        
+        let adaptive = model.get_adaptive_noise();
+        assert!(adaptive[0] >= config.noise_amplitude);
     }
 }

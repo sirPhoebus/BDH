@@ -4,9 +4,16 @@ use rand::thread_rng;
 
 pub mod lsh;
 pub mod harmonic;
+pub mod data;
+pub mod training;
 
 pub use lsh::{LshEmbedder, Vocabulary};
-pub use harmonic::{HarmonicBdh, BiologicalConfig, generate_brainwave};
+pub use harmonic::{
+    HarmonicBdh, BiologicalConfig, DaydreamStep, ThoughtState,
+    Concept, generate_brainwave,
+};
+pub use data::{Embedder, TrainingBatch, load_texts_from_dir, chunk_text};
+pub use training::{Trainer, TrainingConfig, TrainingMetrics};
 
 /// Helper: Layer normalization that handles zero-vectors safely.
 fn layer_norm(x: &Array1<f32>) -> Array1<f32> {
