@@ -1,1 +1,1 @@
-{"step":10000,"coherence":0.0462,"diversity":0.0700,"concepts_learned":7,"energy_stability":0.853,"read_steps":5172,"dream_steps":4828,"mem_stores":0,"mem_recalls":0,"chunk_ptr":1078,"book_chunks":4349}
+{"step":620,"coherence":0.0515,"diversity":0.2811,"concepts_learned":7,"energy_stability":0.853,"read_steps":322,"dream_steps":298,"mem_stores":0,"mem_recalls":0,"chunk_ptr":322,"book_chunks":1489}

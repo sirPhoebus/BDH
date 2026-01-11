@@ -73,7 +73,14 @@ def update(frame):
     
     current_step = current_data.get('step', 0)
     
-    # Avoid duplicate steps if file hasn't changed
+    # RESET DETECTED: If current step is less than last step, the potential sim restarted
+    if steps and current_step < steps[-1]:
+        print("Simulation reset detected! Clearing history...")
+        steps.clear()
+        for key in numeric_keys:
+            data_history[key].clear()
+
+    # Avoid duplicate steps if file hasn't changed (and we didn't just reset)
     if steps and steps[-1] == current_step:
         return lines.values()
         

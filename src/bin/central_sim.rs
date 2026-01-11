@@ -6,12 +6,13 @@ use bdh_model::interpreter::Interpreter;
 use bdh_model::memory::MemorySystem;
 use burn_wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::Tensor;
-use std::time::Duration;
-use std::thread;
+
 use ndarray::Array1;
 use std::collections::VecDeque;
-use serde::{Serialize, Deserialize}; // Added Deserialize just in case, but definitely need Chunk
+use serde::Serialize; // Added Deserialize just in case, but definitely need Chunk
 use bdh_model::data::Chunk; // Import Chunk explicitly
+use std::process::Command;
+
 
 use axum::{
     routing::get,
@@ -23,7 +24,7 @@ use tower_http::services::ServeDir;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 
-const BENCHMARK_INTERVAL: usize = 500; // Lowered for faster verification
+const BENCHMARK_INTERVAL: usize = 10; // Lowered for faster verification
 
 
 #[derive(Serialize, Clone)]
@@ -85,7 +86,7 @@ struct LearningMetrics {
     coherence_samples: Vec<f32>,
     
     // Novel learning: how many new concepts discovered
-    concepts_at_start: usize,
+    _concepts_at_start: usize,
     concepts_now: usize,
     
     // Dream/Read ratio (healthy = balanced)
@@ -109,7 +110,7 @@ impl LearningMetrics {
             concept_counts: std::collections::HashMap::new(),
             total_recognitions: 0,
             coherence_samples: Vec::new(),
-            concepts_at_start: initial_concepts,
+            _concepts_at_start: initial_concepts,
             concepts_now: initial_concepts,
             dream_steps: 0,
             read_steps: 0,
@@ -183,9 +184,7 @@ impl LearningMetrics {
         last - first
     }
     
-    fn learning_rate(&self) -> f32 {
-        (self.concepts_now - self.concepts_at_start) as f32
-    }
+
     
     fn energy_stability(&self) -> f32 {
         if self.energy_samples.len() < 2 { return 0.0; }
@@ -194,9 +193,9 @@ impl LearningMetrics {
         1.0 / (1.0 + variance.sqrt()) // Higher = more stable
     }
     
-    fn print_benchmark(&self, step: usize) {
+    fn print_benchmark(&self, _step: usize) {
         let trend = self.coherence_trend();
-        let trend_symbol = if trend > 0.01 { "📈" } else if trend < -0.01 { "📉" } else { "➡️" };
+        let _trend_symbol = if trend > 0.01 { "📈" } else if trend < -0.01 { "📉" } else { "➡️" };
         
         /*
         println!("\n╔══════════════════════════════════════════════════════════════════════════╗");
@@ -227,6 +226,15 @@ impl LearningMetrics {
 
 #[tokio::main]
 async fn main() {
+    // Reset probe.json to signal fresh start
+    let _ = std::fs::write("probe.json", r#"{"step": 0}"#);
+
+    // Auto-launch visualization (non-blocking)
+    let _ = Command::new("python")
+        .arg("monitor_probe.py")
+        .spawn()
+        .map_err(|e| eprintln!("Warning: Failed to launch monitor_probe.py: {}", e));
+    
     // println!("Initializing CENTRAL SIM (Grand Unification)...");
     
     // 0. Setup Networking
@@ -326,7 +334,7 @@ async fn main() {
         concept_memory.push((name.to_string(), vec.to_vec().into()));
     }
     
-    // println!("\nSIMULATION STARTING. Reading: Book 0\n");
+    println!("\nSIMULATION STARTING. Reading: Book 0\n");
     /*
     println!("Step | Energy | Valnc | Drive  | Conf | Input Word      | Prediction      | Inner Voice");
     println!("-----+--------+-------+--------+------+-----------------+-----------------+-------------------------------------");
