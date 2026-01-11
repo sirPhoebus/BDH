@@ -152,8 +152,8 @@ impl LearningMetrics {
     
     fn record_concept_learned(&mut self, concept: &str, _step: usize) {
         if !self.concept_counts.contains_key(concept) {
-             // Synaptic Scaling Filter: Only count tokens > 3 chars as a "Learned Concept"
-             if concept.len() > 3 && !concept.starts_with("[") {
+             // Synaptic Scaling Filter: Only count tokens > 2 chars as a "Learned Concept"
+             if concept.len() > 2 && !concept.starts_with("[") {
                 self.concepts_now += 1;
              }
         }
@@ -739,15 +739,21 @@ async fn main() {
                         best_concept = name.to_string();
                     }
                 }
+                
+                // Debug why learning stops
+                if step % 200 == 0 {
+                    println!("   [Debug] Step {}: Best Match '{}' ({:.4})", step, best_concept, best_score);
+                }
 
                 // If still unrecognized, associate the current *Input Stimulus* word as a NEW concept
                 if let Some(word_str) = &current_word {
-                    if best_score < 0.5 && sum_e > 0.3 && word_str.len() > 3 && word_str != "<unk>" && !word_str.starts_with("[") {
-                        // println!("   [Learning] Associated Word '{}' with new brain state.", word_str);
-                        concept_memory.push((word_str.clone(), output_arr));
-                        metrics.record_concept_learned(word_str.as_str(), step);
-                        best_concept = word_str.clone();
-                        best_score = 1.0; 
+                    // AGGRESSIVE TUNING: Threshold 0.01, Length > 2
+                    if best_score < 0.5 && sum_e > 0.01 && word_str.len() > 2 && word_str != "<unk>" && !word_str.starts_with("[") {
+                         println!("   [!] LEARNED NEW CONCEPT: '{}' (E={:.4}, Score={:.4})", word_str, sum_e, best_score);
+                         concept_memory.push((word_str.clone(), output_arr));
+                         metrics.record_concept_learned(word_str.as_str(), step);
+                         best_concept = word_str.clone();
+                         best_score = 1.0; 
                     }
                 }
             }
@@ -804,8 +810,9 @@ async fn main() {
             // NUCLEUS COERULEUS: Boredom / Frustration
             // If diversity is low, we are stuck in a loop. INCREASE NOISE.
             let diversity = metrics.concept_diversity();
-            if diversity < 0.2 && step > 500 {
-                 let frustration = (0.2 - diversity) * 5.0; // 0.0 to 1.0
+            // AGGRESSIVE: Raise threshold to 0.5 to force noise if stuck in attractors
+            if diversity < 0.5 && step > 500 {
+                 let frustration = (0.5 - diversity) * 5.0; // 0.0 to 1.0
                  // Boost NE significantly to break attractors
                  body.chemicals.norepinephrine += frustration * 0.1;
                  // reduce dopamine to stop reinforcement of current state

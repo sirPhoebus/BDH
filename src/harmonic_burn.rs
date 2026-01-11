@@ -120,8 +120,9 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         // STABILITY FIX: Clamp input gain to prevent overshoot
         self.set_input_gain(ach.clamp(0.1, 0.5)); // Was: ach.max(0.1) - now capped
         
-        // NE: Noradrenergic modulation - REDUCED noise scale
-        self.noise_scale = 0.001 + (ne * 0.02); // Was: 0.005 + ne*0.05
+        // NE: Noradrenergic modulation - AGGRESSIVE Noise to break attractors
+        // If NE is high (frustration), noise goes up to 0.5
+        self.noise_scale = 0.001 + (ne * 0.5);
         
         // DA: REDUCED self-excitation to prevent runaway
         self.self_excitation = da * 0.02; // Was: da * 0.1
