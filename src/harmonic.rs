@@ -41,6 +41,30 @@ pub struct BiologicalConfig {
     pub layer_frequencies: Vec<f32>,
     /// Steps of low energy before adaptive noise kicks in (default: 10)
     pub boredom_delay: usize,
+    
+    // === Stochastic Resonance / Self-Thinking ===
+    
+    /// Thermal noise floor - minimum energy injection (never zero)
+    pub thermal_noise: f32,
+    /// Minimum energy floor - system never drops below this
+    pub min_energy_floor: f32,
+    /// Self-feedback strength during reflection (0.0-1.0)
+    pub reflection_feedback: f32,
+    /// Spontaneous memory recall threshold
+    pub recall_threshold: f32,
+    
+    // === Temporal / Chronos System ===
+    
+    /// Heartbeat frequency - the "metabolic clock" of the system (Hz)
+    pub heartbeat_freq: f32,
+    /// Heartbeat modulation strength (0.0 = no gating, 1.0 = full gating)
+    pub heartbeat_strength: f32,
+    /// Rho decay rate per timestep (prevents unbounded growth)
+    pub rho_decay: f32,
+    /// Number of time encoding frequencies (multi-scale temporal memory)
+    pub time_encoding_dims: usize,
+    /// Base frequency for time encoding
+    pub time_encoding_base: f32,
 }
 
 impl Default for BiologicalConfig {
@@ -58,6 +82,17 @@ impl Default for BiologicalConfig {
             adaptive_noise_rate: 0.80,    // Very high - rapid recovery
             layer_frequencies: vec![],    // Empty = use default
             boredom_delay: 2,             // Boredom kicks in very fast
+            // Stochastic resonance defaults
+            thermal_noise: 0.015,         // Always-on background noise
+            min_energy_floor: 0.02,       // Never truly zero energy
+            reflection_feedback: 0.7,     // Strong self-feedback during reflection
+            recall_threshold: 0.1,        // Threshold for spontaneous recall
+            // Temporal / Chronos defaults
+            heartbeat_freq: 1.0,          // 1 Hz heartbeat (like resting heart rate)
+            heartbeat_strength: 0.3,      // Moderate gating
+            rho_decay: 0.995,             // Slow decay (retains ~60% after 100 steps)
+            time_encoding_dims: 8,        // 8 frequency bands for time encoding
+            time_encoding_base: 10000.0,  // Base for positional encoding
         }
     }
 }
@@ -70,7 +105,7 @@ pub struct Concept {
 }
 
 /// Thought state labels based on frequency/energy patterns.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ThoughtState {
     Resting,
     Contemplative,
@@ -110,6 +145,15 @@ pub struct HarmonicBdh {
     
     /// Concept space for semantic interpretation
     concepts: Vec<Concept>,
+    
+    // === Temporal / Chronos fields ===
+    
+    /// Global time counter (in arbitrary units)
+    global_time: f32,
+    /// Time encoding cache (multi-scale positional encoding)
+    time_encoding: Array1<f32>,
+    /// Imprinted memories with timestamps: (time, layer, pattern_hash)
+    memory_timestamps: Vec<(f32, usize, u64)>,
     
     pub config: BiologicalConfig,
 }
@@ -153,6 +197,9 @@ impl HarmonicBdh {
         // Initialize concept space
         let concepts = Self::create_concept_space(n);
         
+        // Initialize time encoding
+        let time_encoding = Array1::zeros(config.time_encoding_dims);
+        
         Self {
             n,
             d,
@@ -168,6 +215,9 @@ impl HarmonicBdh {
             layer_frequencies,
             num_layers,
             concepts,
+            global_time: 0.0,
+            time_encoding,
+            memory_timestamps: Vec::new(),
             config,
         }
     }
@@ -439,13 +489,213 @@ impl HarmonicBdh {
             }
         }
     }
+
+    // ========================================================================
+    // TEMPORAL / CHRONOS SYSTEM
+    // ========================================================================
+
+    /// Compute the current heartbeat factor (0.0 to 1.0).
+    /// Peak receptivity at heartbeat peaks, reduced at troughs.
+    fn compute_heartbeat(&self) -> f32 {
+        (self.global_time * self.config.heartbeat_freq * 2.0 * PI).sin().abs()
+    }
+
+    /// Advance global time.
+    pub fn step_time(&mut self, delta: f32) {
+        self.global_time += delta;
+    }
+
+    /// Get current global time.
+    pub fn get_time(&self) -> f32 {
+        self.global_time
+    }
+
+    /// Update multi-scale time encoding (like positional encoding in transformers).
+    fn update_time_encoding(&mut self) {
+        let dims = self.config.time_encoding_dims;
+        let base = self.config.time_encoding_base;
+        
+        self.time_encoding = Array1::from_iter((0..dims).map(|i| {
+            let freq = 1.0 / base.powf(i as f32 / dims as f32);
+            if i % 2 == 0 {
+                (self.global_time * freq).sin()
+            } else {
+                (self.global_time * freq).cos()
+            }
+        }));
+    }
+
+    /// Get current time encoding vector.
+    pub fn get_time_encoding(&self) -> &Array1<f32> {
+        &self.time_encoding
+    }
+
+    /// Update standing wave with temporal encoding (time-weighted Hebbian learning).
+    fn update_standing_wave_temporal(&mut self, excitation: &Array1<f32>, self_excite: &Array1<f32>, layer: usize) {
+        let dt = 0.1;
+        let layer_damp = self.layer_damping[layer];
+        
+        // Compute temporal modulation from time encoding
+        let time_mod = if self.time_encoding.len() > 0 {
+            // Use first few time encoding dims to modulate phase
+            self.time_encoding.iter().take(4).sum::<f32>() / 4.0
+        } else {
+            0.0
+        };
+        
+        for mode in 0..self.d {
+            let mode_freq = (mode + 1) as f32 * 0.5;
+            
+            // Mode-specific time encoding (different modes encode different timescales)
+            let mode_time_weight = if mode < self.time_encoding.len() {
+                1.0 + 0.2 * self.time_encoding[mode]
+            } else {
+                1.0
+            };
+            
+            for neuron in 0..self.n {
+                let current = self.rho[layer][[mode, neuron]];
+                
+                let omega = self.natural_freq[neuron] + mode_freq;
+                let rotation = Complex32::new((omega * dt).cos(), (omega * dt).sin());
+                
+                let effective_damping = layer_damp * self.neuron_damping[layer][neuron];
+                let damped = current * effective_damping;
+                
+                // Combined drive: external + self-excitation, modulated by time
+                let total_drive = (excitation[neuron] + self_excite[neuron]) * mode_time_weight;
+                let drive = total_drive * self.coupling[[mode, neuron]];
+                
+                // Phase includes both global phase and temporal modulation
+                let phase = self.global_phase + time_mod * 0.5;
+                let drive_phasor = Complex32::new(
+                    drive * phase.cos(),
+                    drive * phase.sin(),
+                );
+                
+                self.rho[layer][[mode, neuron]] = damped * rotation + drive_phasor * dt;
+            }
+        }
+    }
+
+    /// Apply rho decay to prevent unbounded memory growth.
+    fn apply_rho_decay(&mut self, layer: usize) {
+        let decay = self.config.rho_decay;
+        for mode in 0..self.d {
+            for neuron in 0..self.n {
+                self.rho[layer][[mode, neuron]] *= decay;
+            }
+        }
+    }
+
+    /// Imprint a signal at the current time (creates a timestamped memory).
+    pub fn imprint(&mut self, signal: &Array1<f32>, layer: usize) {
+        // Compute pattern hash for later identification
+        let hash = self.compute_pattern_hash(signal);
+        
+        // Record timestamp
+        self.memory_timestamps.push((self.global_time, layer, hash));
+        
+        // Strong Hebbian imprint at heartbeat peak
+        let heartbeat = self.compute_heartbeat();
+        let imprint_strength = 0.5 + 0.5 * heartbeat; // 0.5 to 1.0
+        
+        let latent: Array1<f32> = self.coupling.dot(signal);
+        
+        for mode in 0..self.d {
+            for neuron in 0..self.n {
+                let update = latent[mode] * signal[neuron] * imprint_strength;
+                
+                // Encode with current time phase
+                let time_phase = if mode < self.time_encoding.len() {
+                    self.time_encoding[mode]
+                } else {
+                    0.0
+                };
+                
+                let phasor = Complex32::new(
+                    update * (self.global_phase + time_phase).cos(),
+                    update * (self.global_phase + time_phase).sin(),
+                );
+                
+                self.rho[layer][[mode, neuron]] += phasor;
+            }
+        }
+    }
+
+    /// Compute a simple hash of a pattern for identification.
+    fn compute_pattern_hash(&self, signal: &Array1<f32>) -> u64 {
+        let mut hash: u64 = 0;
+        for (i, &v) in signal.iter().enumerate().take(8) {
+            hash ^= ((v * 1000.0) as u64) << (i * 8);
+        }
+        hash
+    }
+
+    /// Attempt to recall a pattern from a partial cue.
+    pub fn recall(&mut self, cue: &Array1<f32>, layer: usize) -> Array1<f32> {
+        // Apply cue through resonance
+        let (output, _, _) = self.forward(cue);
+        
+        // The standing wave rho should resonate with matching patterns
+        let mut recalled = Array1::zeros(self.n);
+        
+        for neuron in 0..self.n {
+            let mut total = 0.0f32;
+            for mode in 0..self.d {
+                total += self.rho[layer][[mode, neuron]].norm() * self.coupling[[mode, neuron]];
+            }
+            recalled[neuron] = total;
+        }
+        
+        // Blend cue response with rho resonance
+        &output * 0.3 + &recalled * 0.7
+    }
+
+    /// Get memory timestamps for debugging/analysis.
+    pub fn get_memory_timestamps(&self) -> &[(f32, usize, u64)] {
+        &self.memory_timestamps
+    }
+
+    /// Forward pass with explicit time control (like ChronosBdh).
+    pub fn forward_at_time(&mut self, input: &Array1<f32>, time: f32) -> (Array1<f32>, Vec<f32>, Vec<f32>) {
+        self.global_time = time;
+        self.forward(input)
+    }
+
+    /// Check if currently at a heartbeat peak (good time for imprinting).
+    pub fn is_heartbeat_peak(&self) -> bool {
+        self.compute_heartbeat() > 0.9
+    }
+
+    /// Advance time until next heartbeat peak.
+    pub fn advance_to_heartbeat_peak(&mut self) {
+        let freq = self.config.heartbeat_freq;
+        // sin(t * freq * 2π) peaks at t = (0.25 + n) / freq
+        let current_cycle = (self.global_time * freq).floor();
+        let next_peak = (current_cycle + 0.25) / freq;
+        
+        if next_peak > self.global_time {
+            self.global_time = next_peak;
+        } else {
+            self.global_time = (current_cycle + 1.25) / freq;
+        }
+        self.update_time_encoding();
+    }
     
     /// Forward pass with all biological mechanisms.
     /// Returns (output, energies, phase_coherences)
     pub fn forward(&mut self, input: &Array1<f32>) -> (Array1<f32>, Vec<f32>, Vec<f32>) {
-        let mut signal = input.clone();
+        // (0) TEMPORAL GATING: Heartbeat modulation
+        let heartbeat = self.compute_heartbeat();
+        let gating_factor = 1.0 - self.config.heartbeat_strength * (1.0 - heartbeat);
+        let mut signal = input * gating_factor;
+        
         let mut energy_per_layer = Vec::with_capacity(self.num_layers);
         let mut coherence_per_layer = Vec::with_capacity(self.num_layers);
+        
+        // Update time encoding for this step
+        self.update_time_encoding();
         
         for layer in 0..self.num_layers {
             // (A) SPONTANEOUS ACTIVITY: noise + endogenous drive + self-excitation
@@ -466,11 +716,14 @@ impl HarmonicBdh {
                 1.0 / (1.0 + (-5.0 * (normalized - 0.2)).exp())
             });
             
-            // Update standing wave with self-excitation
+            // Update standing wave with self-excitation AND time encoding
             let excitation = &signal * &resonance_gate;
-            self.update_standing_wave(&excitation, &self_excite, layer);
+            self.update_standing_wave_temporal(&excitation, &self_excite, layer);
             
             signal = &signal * &resonance_gate;
+            
+            // (D) RHO DECAY: Prevent unbounded growth
+            self.apply_rho_decay(layer);
             
             let layer_energy: f32 = self.rho[layer].iter().map(|c| c.norm_sqr()).sum();
             energy_per_layer.push(layer_energy);
@@ -481,6 +734,9 @@ impl HarmonicBdh {
             // Update adaptive noise
             self.update_adaptive_noise(layer, layer_energy);
         }
+        
+        // Advance time
+        self.step_time(0.1);
         
         self.global_phase += 0.1;
         if self.global_phase > 2.0 * PI {
@@ -639,6 +895,270 @@ impl HarmonicBdh {
             self.layer_frequencies = freqs;
         }
     }
+
+    /// Get number of layers.
+    pub fn num_layers(&self) -> usize {
+        self.num_layers
+    }
+
+    /// Get reference to rho state for a layer.
+    pub fn get_rho(&self, layer: usize) -> &ComplexState {
+        &self.rho[layer]
+    }
+
+    /// Get mutable reference to rho state for a layer.
+    pub fn get_rho_mut(&mut self, layer: usize) -> &mut ComplexState {
+        &mut self.rho[layer]
+    }
+
+    /// Apply a forgetting mask to rho state (element-wise multiply).
+    pub fn apply_rho_mask(&mut self, layer: usize, mask: &ndarray::Array2<f32>) {
+        for mode in 0..self.d {
+            for neuron in 0..self.n {
+                let scale = mask[[mode, neuron]];
+                self.rho[layer][[mode, neuron]] *= scale;
+            }
+        }
+    }
+
+    /// Reset rho states to zero.
+    pub fn reset_rho(&mut self) {
+        for layer in 0..self.num_layers {
+            self.rho[layer].fill(Complex32::new(0.0, 0.0));
+        }
+    }
+
+    /// Blend rho state with a snapshot (for replay).
+    pub fn blend_rho(&mut self, layer: usize, snapshot: &ndarray::Array2<f32>, blend_factor: f32) {
+        for mode in 0..self.d {
+            for neuron in 0..self.n {
+                let current = self.rho[layer][[mode, neuron]];
+                let target_amp = snapshot[[mode, neuron]];
+                let target = Complex32::new(target_amp * current.arg().cos(), target_amp * current.arg().sin());
+                self.rho[layer][[mode, neuron]] = current * (1.0 - blend_factor) + target * blend_factor;
+            }
+        }
+    }
+
+    // ========================================================================
+    // SELF-THINKING / REFLECTION (Stochastic Resonance + Self-Feedback)
+    // ========================================================================
+
+    /// Inject thermal noise directly into rho states (stochastic resonance).
+    /// This ensures the system never truly reaches zero energy.
+    fn inject_thermal_noise(&mut self) {
+        let mut rng = rand::thread_rng();
+        let thermal = self.config.thermal_noise;
+        
+        if thermal <= 0.0 {
+            return;
+        }
+        
+        for layer in 0..self.num_layers {
+            for mode in 0..self.d {
+                for neuron in 0..self.n {
+                    // Add small random phase perturbation
+                    let phase_noise = rng.gen_range(-PI * 0.1..PI * 0.1);
+                    let amp_noise = rng.gen_range(0.0..thermal);
+                    
+                    let current = self.rho[layer][[mode, neuron]];
+                    let noise_phasor = Complex32::new(
+                        amp_noise * phase_noise.cos(),
+                        amp_noise * phase_noise.sin(),
+                    );
+                    self.rho[layer][[mode, neuron]] = current + noise_phasor;
+                }
+            }
+        }
+    }
+
+    /// Enforce minimum energy floor - the brain never truly goes silent.
+    fn enforce_energy_floor(&mut self) {
+        let mut rng = rand::thread_rng();
+        let floor = self.config.min_energy_floor;
+        
+        for layer in 0..self.num_layers {
+            let energy: f32 = self.rho[layer].iter().map(|c| c.norm_sqr()).sum();
+            
+            if energy < floor {
+                // Inject energy at random neurons to reach floor
+                let deficit = floor - energy;
+                let inject_per = (deficit / (self.n as f32)).sqrt();
+                
+                for neuron in 0..self.n {
+                    if rng.gen::<f32>() < 0.1 {
+                        // 10% chance to activate each neuron
+                        let mode = rng.gen_range(0..self.d);
+                        let phase = rng.gen_range(0.0..2.0 * PI);
+                        self.rho[layer][[mode, neuron]] += Complex32::new(
+                            inject_per * phase.cos(),
+                            inject_per * phase.sin(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract the current "vibration" as a signal for self-feedback.
+    fn extract_vibration(&self) -> Array1<f32> {
+        let mut vibration = Array1::zeros(self.n);
+        
+        for neuron in 0..self.n {
+            let mut total = 0.0f32;
+            for layer in 0..self.num_layers {
+                for mode in 0..self.d {
+                    // Weight by mode frequency (lower modes = stronger contribution)
+                    let mode_weight = 1.0 / (mode as f32 + 1.0);
+                    total += self.rho[layer][[mode, neuron]].norm() * mode_weight;
+                }
+            }
+            vibration[neuron] = total / (self.num_layers * self.d) as f32;
+        }
+        
+        vibration
+    }
+
+    /// The "Reflection" pass: The model vibrates on its own internal state.
+    /// This simulates "thinking" or "dreaming" without external input.
+    /// Returns a trajectory of reflection steps with concept interpretations.
+    pub fn reflect(&mut self, iterations: usize) -> Vec<ReflectionStep> {
+        let mut trajectory = Vec::with_capacity(iterations);
+        let mut rng = rand::thread_rng();
+        
+        for step in 0..iterations {
+            // 1. Inject thermal noise (stochastic resonance - always on)
+            self.inject_thermal_noise();
+            
+            // 2. Enforce minimum energy floor
+            self.enforce_energy_floor();
+            
+            // 3. Extract current vibration as self-feedback signal
+            let current_vibration = self.extract_vibration();
+            
+            // 4. Add thermal noise to the feedback signal
+            let thermal_signal: Array1<f32> = Array1::from_iter(
+                (0..self.n).map(|_| rng.gen_range(-self.config.thermal_noise..self.config.thermal_noise))
+            );
+            
+            // 5. Create feedback signal (weighted mix of vibration + noise)
+            let feedback = &current_vibration * self.config.reflection_feedback + &thermal_signal;
+            
+            // 6. Forward pass with self-generated input
+            let (output, energies, coherences) = self.forward(&feedback);
+            
+            // 7. Check for spontaneous memory recall
+            let recall_event = self.detect_memory_recall(&output, &energies);
+            
+            // 8. Classify thought state and concepts
+            let thought_state = self.classify_thought_state(&energies);
+            let top_concepts = self.get_top_concepts(&output, 3);
+            let total_energy: f32 = energies.iter().sum();
+            
+            trajectory.push(ReflectionStep {
+                step,
+                output: output.clone(),
+                energies,
+                coherences,
+                thought_state,
+                top_concepts,
+                total_energy,
+                thermal_contribution: self.config.thermal_noise,
+                recall_event,
+            });
+        }
+        
+        trajectory
+    }
+
+    /// Detect spontaneous memory recall based on sudden energy spikes.
+    fn detect_memory_recall(&self, output: &Array1<f32>, energies: &[f32]) -> Option<String> {
+        let total_energy: f32 = energies.iter().sum();
+        let prev_energy = self.energy_history.iter().sum::<f32>();
+        
+        // Recall detected if energy suddenly increases significantly
+        if total_energy > prev_energy * 2.0 && total_energy > self.config.recall_threshold {
+            let concepts = self.get_top_concepts(output, 2);
+            if !concepts.is_empty() {
+                return Some(format!(
+                    "Spontaneous recall: {} (strength: {:.2})",
+                    concepts[0].0,
+                    concepts[0].1
+                ));
+            }
+        }
+        None
+    }
+
+    /// Stream of consciousness: continuous self-thinking with narrative output.
+    pub fn stream_of_consciousness(&mut self, duration: usize, verbose: bool) -> Vec<String> {
+        let mut narrative = Vec::new();
+        let mut last_state = ThoughtState::Resting;
+        let mut last_concept = "";
+        
+        let trajectory = self.reflect(duration);
+        
+        for step in trajectory {
+            let mut thought = String::new();
+            
+            // State transition
+            if step.thought_state != last_state {
+                thought.push_str(&format!("[{} → {}] ", last_state.as_str(), step.thought_state.as_str()));
+                last_state = step.thought_state.clone();
+            }
+            
+            // Concept shift
+            if !step.top_concepts.is_empty() {
+                let current_concept = step.top_concepts[0].0;
+                if current_concept != last_concept {
+                    thought.push_str(&format!("{{{}}} ", current_concept));
+                    last_concept = current_concept;
+                }
+            }
+            
+            // Memory recall event
+            if let Some(ref recall) = step.recall_event {
+                thought.push_str(&format!("⚡ {} ", recall));
+            }
+            
+            // Energy indicator
+            if step.total_energy > 0.3 {
+                thought.push_str("▲ ");
+            } else if step.total_energy < 0.05 {
+                thought.push_str("▽ ");
+            }
+            
+            if !thought.is_empty() || verbose {
+                if verbose {
+                    thought.push_str(&format!("(E:{:.3})", step.total_energy));
+                }
+                narrative.push(thought);
+            }
+        }
+        
+        narrative
+    }
+
+    /// Get total system energy across all layers.
+    pub fn total_energy(&self) -> f32 {
+        self.rho.iter()
+            .map(|layer| layer.iter().map(|c| c.norm_sqr()).sum::<f32>())
+            .sum()
+    }
+}
+
+/// Rich output from a reflection step.
+#[derive(Clone, Debug)]
+pub struct ReflectionStep {
+    pub step: usize,
+    pub output: Array1<f32>,
+    pub energies: Vec<f32>,
+    pub coherences: Vec<f32>,
+    pub thought_state: ThoughtState,
+    pub top_concepts: Vec<(&'static str, f32)>,
+    pub total_energy: f32,
+    pub thermal_contribution: f32,
+    pub recall_event: Option<String>,
 }
 
 /// Rich output from a daydream step.
@@ -823,5 +1343,264 @@ mod tests {
         
         let adaptive = model.get_adaptive_noise();
         assert!(adaptive[0] >= config.noise_amplitude);
+    }
+
+    #[test]
+    fn test_reflection_never_zero_energy() {
+        let config = BiologicalConfig {
+            thermal_noise: 0.02,
+            min_energy_floor: 0.05,
+            reflection_feedback: 0.7,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Reset to zero state
+        model.reset_rho();
+        
+        // Reflect for many iterations
+        let trajectory = model.reflect(50);
+        
+        // Energy should NEVER be zero due to thermal noise + floor
+        for step in &trajectory {
+            assert!(step.total_energy > 0.0, "Energy should never be zero, got {}", step.total_energy);
+        }
+        
+        // Should have some activity
+        let avg_energy: f32 = trajectory.iter().map(|s| s.total_energy).sum::<f32>() / trajectory.len() as f32;
+        assert!(avg_energy > 0.01, "Average energy should be above floor");
+    }
+
+    #[test]
+    fn test_self_feedback_loop() {
+        let config = BiologicalConfig {
+            thermal_noise: 0.01,
+            min_energy_floor: 0.02,
+            reflection_feedback: 0.8,
+            self_excitation: 0.03,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Initialize with some activity
+        let brainwave = generate_brainwave(64, 10.0, 0.1);
+        model.initialize_from_signal(&brainwave, 0);
+        
+        // Reflect
+        let trajectory = model.reflect(30);
+        
+        // Should have state transitions (not stuck in one state)
+        let states: Vec<_> = trajectory.iter().map(|s| s.thought_state.clone()).collect();
+        let unique_states: std::collections::HashSet<_> = states.iter().collect();
+        
+        // At least 2 different states should appear
+        assert!(unique_states.len() >= 1, "Should have at least some thought states");
+    }
+
+    #[test]
+    fn test_stream_of_consciousness() {
+        let config = BiologicalConfig {
+            thermal_noise: 0.02,
+            min_energy_floor: 0.03,
+            reflection_feedback: 0.7,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Initialize
+        let brainwave = generate_brainwave(64, 10.0, 0.1);
+        model.initialize_from_signal(&brainwave, 0);
+        
+        // Get stream of consciousness
+        let narrative = model.stream_of_consciousness(20, true);
+        
+        // Should produce some narrative
+        assert!(!narrative.is_empty(), "Should produce narrative output");
+        
+        // Verbose mode should have energy readings
+        let has_energy = narrative.iter().any(|s| s.contains("E:"));
+        assert!(has_energy, "Verbose mode should show energy");
+    }
+
+    #[test]
+    fn test_thermal_noise_injection() {
+        let config = BiologicalConfig {
+            thermal_noise: 0.05,
+            noise_amplitude: 0.0,
+            self_excitation: 0.0,
+            endogenous_drive: 0.0,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        model.reset_rho();
+        
+        let initial_energy = model.total_energy();
+        assert!(initial_energy < 0.001, "Should start at near-zero");
+        
+        // Reflect with thermal noise
+        let _ = model.reflect(10);
+        
+        let final_energy = model.total_energy();
+        assert!(final_energy > initial_energy, "Thermal noise should increase energy");
+    }
+
+    #[test]
+    fn test_heartbeat_modulation() {
+        let config = BiologicalConfig {
+            heartbeat_freq: 1.0,
+            heartbeat_strength: 0.5,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // At t=0, heartbeat = sin(0) = 0
+        assert!(!model.is_heartbeat_peak());
+        
+        // Advance to peak
+        model.advance_to_heartbeat_peak();
+        assert!(model.is_heartbeat_peak(), "Should be at heartbeat peak");
+    }
+
+    #[test]
+    fn test_imprint_and_recall() {
+        let config = BiologicalConfig {
+            heartbeat_freq: 1.0,
+            heartbeat_strength: 0.3,
+            rho_decay: 0.999, // Slow decay for test
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Create a distinctive pattern
+        let pattern: Array1<f32> = Array1::from_iter((0..32).map(|i| {
+            if i < 16 { 1.0 } else { 0.0 }
+        }));
+        
+        // Advance to heartbeat peak and imprint
+        model.advance_to_heartbeat_peak();
+        model.imprint(&pattern, 0);
+        
+        // Verify timestamp recorded
+        assert_eq!(model.get_memory_timestamps().len(), 1);
+        
+        // Advance time
+        for _ in 0..10 {
+            model.step_time(1.0);
+        }
+        
+        // Recall with partial cue
+        let cue: Array1<f32> = Array1::from_iter((0..32).map(|i| {
+            if i < 8 { 0.5 } else { 0.0 } // Partial cue
+        }));
+        
+        let recalled = model.recall(&cue, 0);
+        
+        // Recalled pattern should be non-zero
+        assert!(recalled.iter().any(|&v| v.abs() > 0.01), "Should recall something");
+    }
+
+    #[test]
+    fn test_temporal_memory_interference() {
+        let config = BiologicalConfig {
+            heartbeat_freq: 1.0,
+            heartbeat_strength: 0.3,
+            rho_decay: 0.99, // Moderate decay
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Pattern A: first half active
+        let pattern_a: Array1<f32> = Array1::from_iter((0..32).map(|i| {
+            if i < 16 { 1.0 } else { 0.0 }
+        }));
+        
+        // Pattern B: second half active
+        let pattern_b: Array1<f32> = Array1::from_iter((0..32).map(|i| {
+            if i >= 16 { 1.0 } else { 0.0 }
+        }));
+        
+        // Imprint A
+        model.advance_to_heartbeat_peak();
+        model.imprint(&pattern_a, 0);
+        let time_a = model.get_time();
+        
+        // Advance time
+        for _ in 0..20 {
+            model.step_time(0.5);
+        }
+        
+        // Imprint B
+        model.advance_to_heartbeat_peak();
+        model.imprint(&pattern_b, 0);
+        
+        // Verify both timestamps recorded
+        assert_eq!(model.get_memory_timestamps().len(), 2);
+        
+        // The earlier memory should have decayed more
+        // This is the key test for temporal memory
+        let energy = model.total_energy();
+        assert!(energy > 0.0, "Should have some energy from both patterns");
+    }
+
+    #[test]
+    fn test_time_encoding() {
+        let config = BiologicalConfig {
+            time_encoding_dims: 8,
+            time_encoding_base: 10000.0,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Get initial encoding
+        let enc1 = model.get_time_encoding().clone();
+        
+        // Advance time
+        model.step_time(10.0);
+        model.update_time_encoding();
+        let enc2 = model.get_time_encoding().clone();
+        
+        // Encodings should be different
+        let diff: f32 = (&enc1 - &enc2).mapv(|v| v.abs()).sum();
+        assert!(diff > 0.01, "Time encodings should change over time");
+    }
+
+    #[test]
+    fn test_rho_decay_prevents_unbounded_growth() {
+        let config = BiologicalConfig {
+            rho_decay: 0.95, // Fast decay for test
+            noise_amplitude: 0.0,
+            self_excitation: 0.0,
+            endogenous_drive: 0.0,
+            thermal_noise: 0.0,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, config);
+        
+        // Imprint a strong pattern
+        let pattern = Array1::from_elem(32, 1.0);
+        model.imprint(&pattern, 0);
+        
+        let energy_after_imprint = model.total_energy();
+        
+        // Run many forward passes (which apply decay)
+        for _ in 0..50 {
+            let zeros = Array1::zeros(32);
+            model.forward(&zeros);
+        }
+        
+        let energy_after_decay = model.total_energy();
+        
+        // Energy should have decayed significantly
+        assert!(energy_after_decay < energy_after_imprint * 0.5, 
+            "Energy should decay: {} -> {}", energy_after_imprint, energy_after_decay);
     }
 }

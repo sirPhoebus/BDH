@@ -5,7 +5,12 @@
 //! - Training objectives (pattern diversity, reconstruction, prediction)
 //! - Concept coherence loss for narrative-like transitions
 //! - Training loop with logging
+//! - Continual learning with experience replay and adaptive forgetting
 
+use crate::continual::{
+    AdaptiveForgetting, ContinualConfig, ExperienceReplay, 
+    create_experience,
+};
 use crate::harmonic::HarmonicBdh;
 use ndarray::{Array1, Array2, Axis};
 use rand::seq::SliceRandom;
@@ -112,7 +117,6 @@ pub fn diversity_loss(outputs: &[Array1<f32>]) -> f32 {
         return 0.0;
     }
     
-    let n = outputs[0].len();
     let mut total_similarity = 0.0f32;
     let mut count = 0;
     
@@ -265,7 +269,7 @@ pub fn compute_numerical_gradient(
     model: &mut HarmonicBdh,
     inputs: &[Array1<f32>],
     loss_fn: impl Fn(&mut HarmonicBdh, &[Array1<f32>]) -> f32,
-    epsilon: f32,
+    _epsilon: f32,
 ) -> f32 {
     // This is a placeholder - real gradient computation would require
     // differentiable operations. For now, we use perturbation-based updates.
@@ -273,17 +277,56 @@ pub fn compute_numerical_gradient(
     base_loss
 }
 
-/// Trainer for Harmonic BDH.
+/// Trainer for Harmonic BDH with continual learning support.
 pub struct Trainer {
     pub config: TrainingConfig,
+    pub continual_config: Option<ContinualConfig>,
     pub metrics_history: Vec<TrainingMetrics>,
+    replay_buffer: Option<ExperienceReplay>,
+    forgetting: Option<AdaptiveForgetting>,
+    training_step: usize,
 }
 
 impl Trainer {
     pub fn new(config: TrainingConfig) -> Self {
         Self {
             config,
+            continual_config: None,
             metrics_history: Vec::new(),
+            replay_buffer: None,
+            forgetting: None,
+            training_step: 0,
+        }
+    }
+
+    /// Create trainer with continual learning enabled.
+    pub fn with_continual_learning(config: TrainingConfig, continual_config: ContinualConfig) -> Self {
+        let replay_buffer = ExperienceReplay::new(
+            continual_config.buffer_capacity,
+            continual_config.priority_exponent,
+        );
+        
+        Self {
+            config,
+            continual_config: Some(continual_config),
+            metrics_history: Vec::new(),
+            replay_buffer: Some(replay_buffer),
+            forgetting: None, // Initialized when model dimensions are known
+            training_step: 0,
+        }
+    }
+
+    /// Initialize forgetting mechanism (call once model is available).
+    fn init_forgetting(&mut self, model: &HarmonicBdh) {
+        if let Some(ref cfg) = self.continual_config {
+            if self.forgetting.is_none() {
+                self.forgetting = Some(AdaptiveForgetting::new(
+                    model.num_layers(),
+                    model.d,
+                    model.n,
+                    cfg.clone(),
+                ));
+            }
         }
     }
     
@@ -295,10 +338,18 @@ impl Trainer {
     ) {
         let mut rng = thread_rng();
         
+        // Initialize continual learning components
+        self.init_forgetting(model);
+        let use_continual = self.continual_config.is_some();
+        let replay_ratio = self.continual_config.as_ref().map(|c| c.replay_ratio).unwrap_or(0.0);
+        
         println!("Starting unsupervised training...");
         println!("  Epochs: {}", self.config.epochs);
         println!("  Sequences: {}", sequences.len());
         println!("  Batch size: {}", self.config.batch_size);
+        if use_continual {
+            println!("  Continual learning: ENABLED (replay_ratio={:.1}%)", replay_ratio * 100.0);
+        }
         
         for epoch in 0..self.config.epochs {
             // Shuffle sequences
@@ -331,10 +382,45 @@ impl Trainer {
                         batch_inputs.push(input.clone());
                         
                         let (output, energies, _) = model.forward(&input);
-                        seq_outputs.push(output);
-                        batch_energies.extend(energies);
+                        seq_outputs.push(output.clone());
+                        batch_energies.extend(energies.clone());
+                        
+                        // Store experience for replay
+                        if use_continual {
+                            let exp = create_experience(&input, &output, model, &energies, self.training_step);
+                            if let Some(ref mut buffer) = self.replay_buffer {
+                                buffer.push(exp);
+                            }
+                            
+                            // Update importance tracking
+                            if let Some(ref mut forgetting) = self.forgetting {
+                                forgetting.update(model);
+                            }
+                            
+                            self.training_step += 1;
+                        }
                     }
                     batch_outputs.extend(seq_outputs);
+                }
+                
+                // Mix in replay experiences
+                if use_continual && replay_ratio > 0.0 {
+                    let replay_count = (batch_inputs.len() as f32 * replay_ratio) as usize;
+                    if let Some(ref buffer) = self.replay_buffer {
+                        let replayed = buffer.sample(replay_count);
+                        for exp in replayed {
+                            // Re-forward the replayed input
+                            let (output, energies, _) = model.forward(&exp.input);
+                            batch_inputs.push(exp.input.clone());
+                            batch_outputs.push(output);
+                            batch_energies.extend(energies);
+                            
+                            // Consolidate replayed patterns
+                            if let Some(ref mut forgetting) = self.forgetting {
+                                forgetting.consolidate(model);
+                            }
+                        }
+                    }
                 }
                 
                 // Compute losses
@@ -375,6 +461,16 @@ impl Trainer {
                 // Perturbation-based adaptation (simple evolutionary update)
                 // Adjust biological config based on loss
                 self.adapt_config(model, total_loss);
+                
+                // Apply adaptive forgetting periodically
+                if use_continual {
+                    if let Some(ref mut forgetting) = self.forgetting {
+                        if forgetting.should_consolidate() {
+                            forgetting.apply_forgetting(model);
+                            forgetting.decay_consolidation();
+                        }
+                    }
+                }
             }
             
             // Average metrics
@@ -391,7 +487,7 @@ impl Trainer {
             
             // Log progress
             if epoch % self.config.log_every == 0 || epoch == self.config.epochs - 1 {
-                println!(
+                print!(
                     "Epoch {:4} │ Loss: {:.4} │ Div: {:.3} │ Recon: {:.3} │ Coher: {:.3} │ Spars: {:.1}%",
                     epoch,
                     epoch_metrics.total_loss,
@@ -400,6 +496,16 @@ impl Trainer {
                     epoch_metrics.concept_coherence_loss,
                     epoch_metrics.avg_sparsity * 100.0
                 );
+                
+                // Log continual learning stats
+                if use_continual {
+                    let buffer_size = self.replay_buffer.as_ref().map(|b| b.len()).unwrap_or(0);
+                    let (avg_imp, avg_cons, _) = self.forgetting.as_ref()
+                        .map(|f| f.get_stats())
+                        .unwrap_or((0.0, 0.0, 0.0));
+                    print!(" │ Buf: {} │ Imp: {:.3} │ Cons: {:.2}", buffer_size, avg_imp, avg_cons);
+                }
+                println!();
             }
             
             self.metrics_history.push(epoch_metrics);
@@ -426,7 +532,6 @@ impl Trainer {
     
     /// Generate synthetic training data for testing.
     pub fn generate_synthetic_data(n: usize, num_sequences: usize, seq_len: usize) -> Vec<Array2<f32>> {
-        let mut rng = thread_rng();
         let mut sequences = Vec::with_capacity(num_sequences);
         
         for _ in 0..num_sequences {
@@ -510,5 +615,39 @@ mod tests {
         trainer.train_unsupervised(&mut model, &data);
         
         assert_eq!(trainer.metrics_history.len(), 5);
+    }
+
+    #[test]
+    fn test_continual_learning_training() {
+        let config = TrainingConfig {
+            epochs: 5,
+            batch_size: 2,
+            log_every: 2,
+            ..Default::default()
+        };
+        
+        let continual_config = ContinualConfig {
+            buffer_capacity: 100,
+            replay_ratio: 0.3,
+            consolidation_interval: 10,
+            ..Default::default()
+        };
+        
+        let bio_config = BiologicalConfig {
+            noise_amplitude: 0.01,
+            self_excitation: 0.01,
+            ..Default::default()
+        };
+        
+        let mut model = HarmonicBdh::with_config(32, 8, 2, bio_config);
+        let data = Trainer::generate_synthetic_data(32, 8, 4);
+        
+        let mut trainer = Trainer::with_continual_learning(config, continual_config);
+        trainer.train_unsupervised(&mut model, &data);
+        
+        assert_eq!(trainer.metrics_history.len(), 5);
+        
+        // Verify replay buffer was populated
+        assert!(trainer.replay_buffer.as_ref().unwrap().len() > 0);
     }
 }

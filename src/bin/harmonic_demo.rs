@@ -63,6 +63,7 @@ fn main() {
         base_damping: 0.95,
         layer_frequencies: layer_freqs.clone(),
         boredom_delay: 10,
+        ..Default::default()
     };
 
     let n = args.neurons;

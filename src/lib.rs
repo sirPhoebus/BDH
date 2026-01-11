@@ -6,14 +6,20 @@ pub mod lsh;
 pub mod harmonic;
 pub mod data;
 pub mod training;
+pub mod continual;
 
 pub use lsh::{LshEmbedder, Vocabulary};
 pub use harmonic::{
     HarmonicBdh, BiologicalConfig, DaydreamStep, ThoughtState,
-    Concept, generate_brainwave,
+    Concept, generate_brainwave, ReflectionStep,
 };
 pub use data::{Embedder, TrainingBatch, load_texts_from_dir, chunk_text};
 pub use training::{Trainer, TrainingConfig, TrainingMetrics};
+pub use continual::{
+    ContinualConfig, ExperienceReplay, AdaptiveForgetting,
+    Experience, ImportanceTracker, compute_surprise, compute_diversity,
+    create_experience,
+};
 
 /// Helper: Layer normalization that handles zero-vectors safely.
 fn layer_norm(x: &Array1<f32>) -> Array1<f32> {
@@ -124,5 +130,71 @@ impl BdhGpu {
         }
 
         outputs
+    }
+
+}
+
+pub struct ChronosBdh {
+    pub n: usize,
+    pub d: usize,
+    pub global_time: f32,
+    pub heartbeat_freq: f32, // The "metabolic rate" of the model
+    pub rho_phase: Vec<Array2<f32>>,
+    pub coupling_strength: Array2<f32>,
+}
+
+impl ChronosBdh {
+    pub fn new(n: usize, d: usize, heartbeat_freq: f32, num_layers: usize) -> Self {
+        let mut rng = thread_rng();
+        let std_dev = 1.0 / (d as f32).sqrt();
+        let dist = Normal::new(0.0, std_dev).unwrap();
+
+        // Initialize coupling strength (projection matrix)
+        let coupling_strength = Array2::random_using((d, n), dist, &mut rng);
+        
+        // Initialize rho phases for each layer
+        let rho_phase = vec![Array2::zeros((d, n)); num_layers];
+
+        Self { 
+            n, 
+            d, 
+            global_time: 0.0, 
+            heartbeat_freq, 
+            rho_phase, 
+            coupling_strength 
+        }
+    }
+
+    pub fn step_time(&mut self, delta: f32) {
+        self.global_time += delta;
+    }
+
+    pub fn forward_with_time(&mut self, input: &Array1<f32>, layer: usize) -> Array1<f32> {
+        // 1. Calculate the Heartbeat Factor
+        // This modulates how "receptive" the model is at this exact millisecond
+        let heartbeat = (self.global_time * self.heartbeat_freq).sin().abs();
+
+        // 2. Temporal Gating
+        // If the heartbeat is at a "trough," the signal is dampened (Filtering noise)
+        // If at a "peak," the model is highly plastic and reactive
+        let temporal_input = input * heartbeat;
+
+        // 3. Update Rho with Time-Weighted Hebbian Learning
+        // The "Memory" now knows WHEN it happened based on the phase of the heartbeat
+        
+        // Calculate latent activation (d x 1)
+        let latent = self.coupling_strength.dot(&temporal_input);
+        
+        // Compute Hebbian update (Outer Product: Latent * Input^T) -> (d x n)
+        // Using insert_axis to create column (d, 1) and row (1, n) vectors for outer product
+        let update = latent.clone().insert_axis(Axis(1)).dot(&temporal_input.clone().insert_axis(Axis(0)));
+        
+        // rho = rho + (update * phase_of_time)
+        let time_encoding = (self.global_time * 0.5).cos(); // A slower "day/night" cycle
+        self.rho_phase[layer] = &self.rho_phase[layer] + &(update * time_encoding);
+
+        // ... rest of the resonance logic ...
+        // Project back to neuron space (simple sum across latent dimensions for now)
+        self.rho_phase[layer].sum_axis(Axis(0))
     }
 }

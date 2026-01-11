@@ -221,6 +221,7 @@ fn main() {
             base_damping: 0.95,
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 2. WEAK ENDOGENOUS DRIVE - stronger L0 injection
@@ -235,6 +236,7 @@ fn main() {
             base_damping: 0.95,
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 3. VAN DER POL - stronger self-excitation
@@ -249,6 +251,7 @@ fn main() {
             base_damping: 0.96,      // Slightly less decay
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 4. BOTH - combined
@@ -263,6 +266,7 @@ fn main() {
             base_damping: 0.96,
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 5. AGGRESSIVE - push the limits
@@ -277,6 +281,7 @@ fn main() {
             base_damping: 0.97,
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 6. TUNED - aggressive but with faster homeostasis to limit burst length
@@ -291,6 +296,7 @@ fn main() {
             base_damping: 0.94,           // More decay
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 7. BURSTY - designed for short frequent bursts
@@ -305,6 +311,7 @@ fn main() {
             base_damping: 0.92,           // High decay
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 8. OPTIMAL - balance between BURSTY and TUNED
@@ -319,6 +326,7 @@ fn main() {
             base_damping: 0.93,
             layer_frequencies: vec![],
             boredom_delay: 10,
+            ..Default::default()
         }),
         
         // 9. SHORT_BURST - targets 8-15 step bursts with high transition rate
@@ -333,6 +341,7 @@ fn main() {
             base_damping: 0.89,
             layer_frequencies: vec![],
             boredom_delay: 2,
+            ..Default::default()
         }),
     ];
 
