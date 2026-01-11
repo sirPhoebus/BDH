@@ -33,6 +33,11 @@ pub struct HarmonicBdhBurn<B: Backend> {
     pub noise_scale: f32,
     pub input_gain: f32,
     pub self_excitation: f32,
+    
+    /// Homeostatic tracking: [Neurons] (fatigue/usage moving average)
+    pub usage: Tensor<B, 1>,
+    pub fatigue_rate: f32,
+    pub inhibition_factor: f32,
 }
 
 impl<B: Backend> HarmonicBdhBurn<B> {
@@ -70,7 +75,9 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             .reshape([d, n]);
 
         // Damping (constant 0.95)
-        let damping = Tensor::<B, 1>::full([num_layers], 0.95, device);
+        let damping = Tensor::<B, 1>::full([num_layers], 0.9, device);
+        
+        let usage = Tensor::<B, 1>::zeros([n], device);
 
         Self {
             n,
@@ -81,10 +88,13 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             natural_freq,
             layer_freq,
             damping,
-            base_dt: 0.01,
+            base_dt: 0.1,
             noise_scale: 0.0,
-            input_gain: 1.0,
-            self_excitation: 0.0,
+            input_gain: 0.1,
+            self_excitation: 0.02,
+            usage,
+            fatigue_rate: 0.005,
+            inhibition_factor: 0.2,
         }
     }
 
@@ -201,17 +211,40 @@ impl<B: Backend> HarmonicBdhBurn<B> {
 
         
         // Update State (Euler)
-        // Real += dReal * dt
-        // Imag += dImag * dt
         let dt = self.base_dt;
         let new_real = real.add(d_real.mul_scalar(dt));
         let new_imag = imag.add(d_imag.mul_scalar(dt));
+
+        // LATERAL INHIBITION: Competition among neurons
+        // We only apply this to the new_real part which affects future dynamics
+        // and interpretation.
+        // threshold = mean + alpha * std
+        let flat_real = new_real.clone().slice([0..1, 0..1, 0..self.n]).reshape([self.n]);
+        let mean = flat_real.clone().mean();
+        let var = flat_real.clone().var(0);
+        let std = var.sqrt();
+        let threshold = mean.add(std.mul_scalar(self.inhibition_factor));
+        
+        // Soft inhibition: keep full value if above threshold, else scale down
+        // In Burn, we use greater() instead of greater_than()
+        let mask_bi = flat_real.clone().greater_equal(threshold.clone().reshape([1])).float();
+        let sup_mask = mask_bi.clone().add(mask_bi.neg().add_scalar(1.0).mul_scalar(0.1)); 
+        
+        // HOMEOSTASIS: Update Usage (Fatigue)
+        // usage = (1-rate)*usage + rate*activation
+        let rate = self.fatigue_rate;
+        self.usage = self.usage.clone().mul_scalar(1.0 - rate)
+            .add(flat_real.clone().abs().mul_scalar(rate));
+
+        // Apply Inhibition to the entire 3D real/imag tensors (broadcasted)
+        let mask_3d = sup_mask.reshape([1, 1, self.n]).expand([self.num_layers, self.d, self.n]);
+        let final_real = new_real.mul(mask_3d.clone());
+        let final_imag = new_imag.mul(mask_3d);
         
         // Stack back into 4D tensor
-        // Expand dims to [Layers, Modes, Neurons, 1] using reshape instead of unsqueeze
         let shape_4d = [self.num_layers, self.d, self.n, 1];
-        let new_real_4d = new_real.reshape(shape_4d);
-        let new_imag_4d = new_imag.reshape(shape_4d);
+        let new_real_4d = final_real.reshape(shape_4d);
+        let new_imag_4d = final_imag.reshape(shape_4d);
         
         self.rho = Tensor::cat(vec![new_real_4d, new_imag_4d], 3);
     }
@@ -227,44 +260,65 @@ impl<B: Backend> HarmonicBdhBurn<B> {
          self.layer_freq = self.layer_freq.clone().mul_scalar(factor);
     }
     
-    /// APPROACH 3: Hebbian weight update - modifies natural frequencies based on input correlation.
-    /// "Neurons that fire together, wire together"
-    /// Input: the embedding being injected [Neurons], learning_rate: 0.0 to 1.0
+    /// HEBBIAN: Modifies natural frequencies based on input correlation + homeostasis.
+    /// Includes Anti-Hebbian drift and usage-based saturation.
     pub fn hebbian_learn(&mut self, input: &[f32], learning_rate: f32) {
         if input.len() != self.n || learning_rate <= 0.0 { return; }
         
-        // Get current activations
         let output = self.get_cortical_output();
+        let usage_data = self.usage.to_data().to_vec::<f32>().unwrap();
         
-        // Calculate correlation: input * output (Hebb rule: delta_w = lr * pre * post)
-        // We modify natural_freq to shift resonance toward input patterns
-        let mut freq_delta = Vec::with_capacity(self.n);
-        for i in 0..self.n {
-            // Correlation: positive if both active, shifts frequency toward input
-            let correlation = input[i] * output[i];
-            freq_delta.push(correlation * learning_rate);
-        }
-        
-        // Apply frequency shift (neurons that correlate shift their tuning)
+        let mean_act = output.iter().sum::<f32>() / self.n as f32;
+        let target_sparsity = 0.05; // Ideal % of active neurons
+
+        let mut next_freq = Vec::with_capacity(self.n);
         let current_freq = self.natural_freq.to_data().to_vec::<f32>().unwrap();
-        let new_freq: Vec<f32> = current_freq.iter()
-            .zip(freq_delta.iter())
-            .map(|(f, d)| (f + d).clamp(0.1, 10.0)) // Clamp to valid range
-            .collect();
-        
+
+        for i in 0..self.n {
+            // 1. Saturation: High usage = low learning (prevents narrow attractors)
+            let saturation = (usage_data[i] / target_sparsity).min(5.0);
+            let effective_lr = learning_rate / (1.0 + saturation);
+
+            // 2. Correlation (Hebbian)
+            let correlation = input[i] * output[i];
+            
+            // 3. Anti-Hebbian: Subtract global average to decorrelate
+            let novelty_signal = correlation - (mean_act * output[i]);
+            
+            // 4. Update with Forgetting Leak
+            let delta_f = effective_lr * novelty_signal;
+            let nf = (current_freq[i] + delta_f) * 0.99999; // Tiny leak to stay stable
+            
+            next_freq.push(nf.clamp(0.01, 10.0));
+        }
+
         let device = self.natural_freq.device();
-        self.natural_freq = Tensor::<B, 1>::from_floats(new_freq.as_slice(), &device);
+        self.natural_freq = Tensor::<B, 1>::from_floats(next_freq.as_slice(), &device);
+    }
+    
+    pub fn get_usage_vec(&self) -> Vec<f32> {
+        self.usage.to_data().to_vec::<f32>().unwrap()
     }
     
     /// Get the current state (Real part of first layer) for interpretation.
     /// Returns [Neurons] Vector.
     pub fn get_cortical_output(&self) -> Vec<f32> {
-        // Take Layer 0, Mode 0 (Fundamental), Real part
-        let out_tensor: Tensor<B, 1> = self.rho.clone()
+        self.rho.clone()
             .slice([0..1, 0..1, 0..self.n, 0..1])
-            .squeeze::<3>(3).squeeze::<2>(1).squeeze::<1>(0);
-        
-        out_tensor.to_data().to_vec::<f32>().unwrap()
+            .reshape([self.n])
+            .to_data().to_vec::<f32>().unwrap()
+    }
+
+    /// Get normalized cortical output as an ndarray for similarity matching.
+    pub fn get_cortical_output_norm(&self) -> Result<ndarray::Array1<f32>, String> {
+        let vec = self.get_cortical_output();
+        let arr = ndarray::Array1::from(vec);
+        let norm = (arr.dot(&arr)).sqrt();
+        if norm < 1e-8 {
+            Ok(arr)
+        } else {
+            Ok(arr / norm)
+        }
     }
     
     /// Calculate current energy (Magnitude squared of Rho).

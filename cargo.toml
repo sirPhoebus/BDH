@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ndarray = "0.15.6"
+ndarray = { version = "0.15.6", features = ["serde"] }
 ndarray-rand = "0.14.0"
 rand = { version = "0.8.5", features = ["std_rng"] }
 num-complex = "0.4"

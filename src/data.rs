@@ -10,9 +10,36 @@ use ndarray::{Array1, Array2};
 use ndarray_rand::{rand_distr::Normal, RandomExt};
 use rand::thread_rng;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use walkdir::WalkDir;
+use rand::distributions::Uniform;
+
+/// Represents a serializable snapshot of the brain's "Knowledge" and State.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BrainState {
+    pub weights: Array2<f32>,       // Random projection matrix (Learned or Fixed)
+    pub natural_freq: Array1<f32>,  // Learned frequencies (The "Knowledge")
+    pub cortical_output: Array1<f32>, // Current firing amplitudes
+    pub usage: Array1<f32>,         // Homeostatic tracking (Fatigue)
+    pub fitness: f32,               // Global coherence metric
+}
+
+impl BrainState {
+    pub fn new(n_neurons: usize, embedding_dim: usize) -> Self {
+        use ndarray_rand::RandomExt;
+        use rand::distributions::Uniform;
+
+        Self {
+            weights: Array2::random((n_neurons, embedding_dim), Uniform::new(-1.0, 1.0)),
+            natural_freq: Array1::random(n_neurons, Uniform::new(0.01, 0.1)),
+            cortical_output: Array1::zeros(n_neurons),
+            usage: Array1::zeros(n_neurons),
+            fitness: 0.0,
+        }
+    }
+}
 
 /// Load all .txt files from a directory.
 pub fn load_texts_from_dir(dir_path: &str) -> io::Result<Vec<String>> {
@@ -214,33 +241,39 @@ impl Embedder {
     
     /// Decode finding the nearest token to the given vector (Cosine Similarity).
     pub fn decode_nearest(&self, query_vec: &Array1<f32>) -> (String, f32) {
-        let mut best_sim = -1.0;
-        // BPE vocab is usually smaller than hash space, iterating 5000 is fast enough.
-        // We iterate 0..vocab_size
-        let mut best_id = 0;
-        
+        let results = self.decode_top_k(query_vec, 1);
+        results[0].clone()
+    }
+
+    /// Decode finding the top-K nearest tokens to the given vector (Cosine Similarity).
+    pub fn decode_top_k(&self, query_vec: &Array1<f32>, k: usize) -> Vec<(String, f32)> {
         // Normalize query
         let q_norm = query_vec.dot(query_vec).sqrt();
         if q_norm < 1e-6 {
-            return ("Void".to_string(), 0.0);
+            return vec![("Void".to_string(), 0.0)];
         }
         
-        // This iteration should be optimized for scale, but for 5k-10k it's fine.
-        for id in 0..self.vocab_size {
-            if id >= self.projection.nrows() { continue; }
-            let emb = self.projection.row(id);
-            let dot = emb.dot(query_vec);
-            let emb_norm = emb.dot(&emb).sqrt();
-            let sim = dot / (q_norm * emb_norm);
-            
-            if sim > best_sim {
-                best_sim = sim;
-                best_id = id;
-            }
-        }
-        
-        let token = self.tokenizer.decode(&[best_id as u32], false).unwrap_or("<err>".to_string());
-        (token, best_sim)
+        let mut results: Vec<(f32, usize)> = (0..self.vocab_size)
+            .filter(|&id| id < self.projection.nrows())
+            .map(|id| {
+                let emb = self.projection.row(id);
+                let dot = emb.dot(query_vec);
+                let emb_norm = emb.dot(&emb).sqrt();
+                let sim = dot / (q_norm * (emb_norm.max(1e-8)));
+                (sim, id)
+            })
+            .collect();
+
+        // Sort by similarity descending
+        results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+
+        results.into_iter()
+            .map(|(sim, id)| {
+                let token = self.tokenizer.decode(&[id as u32], false).unwrap_or("<err>".to_string());
+                (token, sim)
+            })
+            .collect()
     }
 
     /// Get a random token from the vocabulary.
@@ -330,6 +363,17 @@ pub mod acquisition {
         6130,   // The Iliad
         1727,   // The Odyssey
         22381,  // Metamorphoses (Ovid)
+        
+        // === PHILOSOPHY / SCIENCE (DIVERSITY BOOST) ===
+        150,    // The Republic (Plato)
+        2009,   // Origin of Species (Darwin)
+        3825,   // The Life of Reason (Santayana)
+        3600,   // Thus Spake Zarathustra
+        4280,   // Meditations (Marcus Aurelius)
+        5827,   // The Problems of Philosophy (Russell)
+        1228,   // Principles of Philosophy (Descartes)
+        33283,  // Relativity (Einstein)
+        2814,   // Dubliners (Joyce) - for linguistic complexity
         
         // === ADDITIONAL CLASSICS ===
         2701,   // Moby Dick

@@ -3,6 +3,7 @@ use bdh_model::data::acquisition::{download_gutenberg_book, GUTENBERG_IDS};
 use bdh_model::body::BodyState;
 use bdh_model::drives::Drives;
 use bdh_model::interpreter::Interpreter;
+use bdh_model::memory::MemorySystem;
 use burn_wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::Tensor;
 use std::time::Duration;
@@ -20,7 +21,7 @@ use tower_http::services::ServeDir;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 
-const BENCHMARK_INTERVAL: usize = 2000; // APPROACH 6: Adjusted threshold for cleaner logs
+const BENCHMARK_INTERVAL: usize = 500; // Lowered for faster verification
 
 
 #[derive(Serialize, Clone)]
@@ -146,8 +147,14 @@ impl LearningMetrics {
         if is_reading { self.read_steps += 1; } else { self.dream_steps += 1; }
     }
     
-    fn record_concept_learned(&mut self) {
-        self.concepts_now += 1;
+    fn record_concept_learned(&mut self, concept: &str, _step: usize) {
+        if !self.concept_counts.contains_key(concept) {
+             // Smart count: Only count as "learned" if it's meaningful
+             if concept.len() > 3 && !concept.starts_with("[") {
+                self.concepts_now += 1;
+             }
+        }
+        self.record_concept(concept);
     }
     
     fn record_memory_store(&mut self) { self.memory_stores += 1; }
@@ -294,7 +301,10 @@ async fn main() {
     
     // 6. Concept Memory (Restored)
     let mut concept_memory: Vec<(String, Array1<f32>)> = Vec::new();
-    
+
+    // 7. Hippocampal Memory (Hippocampus)
+    println!("7. Memory: Initializing vector store...");
+    let mut memory = MemorySystem::new(100);
     // Semantic Grounding: Enrich vocabulary of thoughts
     let concepts_to_add = vec![
         ("Safety", "safety calm secure protect"),
@@ -325,9 +335,10 @@ async fn main() {
     let food_vec = Tensor::<Backend, 1>::from_floats(food_vec.to_vec().as_slice(), &device);
     let novelty_vec = Tensor::<Backend, 1>::from_floats(novelty_vec.to_vec().as_slice(), &device);
 
-    let mut last_narrative = "".to_string();
-    let mut is_sleeping = false;
+    let mut last_narrative = String::new();
     let mut current_memory_event: Option<Vec<f32>> = None;
+    let mut current_stimulus: Option<Array1<f32>> = None; 
+    let mut is_sleeping = false;
     
     // Learning quality benchmarks
     let mut metrics = LearningMetrics::new(concept_memory.len());
@@ -339,13 +350,16 @@ async fn main() {
         body.update(0.005, 0.0); // Constant decay, energy comes from DATA processing (simulated below)
         
         // --- B. Drive Update (Data Hunger) ---
-        // Hunger increases if we run out of chunks or haven't read in a while.
-        // Simplified: Hunger is inverse of Energy.
-        // Novelty: Later chunks in a book tend to have rarer concepts
-        let is_novel = chunk_ptr > preembedded.len() / 2; // Second half of book is "novel"
-        let novelty = if is_novel { 0.8 } else { 0.1 };
+        // Surprise Signal: inverse of prediction confidence
+        // We use normalized output to get a stable similarity score
+        let surprise = if let Ok(out_norm) = cortex.get_cortical_output_norm() {
+            let (_, sim) = embedder.decode_nearest(&out_norm);
+            (1.0 - sim).max(0.0).min(1.0)
+        } else {
+            0.5 // Default surprise if no output
+        };
         
-        drives.update(body.energy, novelty);
+        drives.update(body.energy, surprise);
         let current_drive = drives.get_dominant_drive();
         
         // --- C. Brain Modulation (Neurochemical) ---
@@ -464,6 +478,7 @@ async fn main() {
                 let input_tensor = if replay_trigger {
                     if let Some(mem) = episodic_buffer.sample() {
                          input_word = format!("*{}*", mem.concept);
+                         current_stimulus = Some(mem.embedding.clone());
                          Tensor::<Backend, 1>::from_floats(mem.embedding.to_vec().as_slice(), &device)
                     } else {
                         // Fallback to Chaining
@@ -473,6 +488,7 @@ async fn main() {
                         
                         let self_talk = format!("I imagine {}", next_token);
                         let feedback_vector = interpreter.reflect(&self_talk, &embedder);
+                        current_stimulus = Some(feedback_vector.clone());
                         Tensor::<Backend, 1>::from_floats(feedback_vector.to_vec().as_slice(), &device)
                     }
                 } else {
@@ -489,6 +505,7 @@ async fn main() {
                     input_word = format!("~{}~", next_token);
                     let self_talk = format!("I feel {}", next_token);
                     let feedback_vector = interpreter.reflect(&self_talk, &embedder);
+                    current_stimulus = Some(feedback_vector.clone());
                     Tensor::<Backend, 1>::from_floats(feedback_vector.to_vec().as_slice(), &device)
                 };
 
@@ -506,8 +523,9 @@ async fn main() {
                       input_word = "self".to_string();
                       let echo_vec = interpreter.reflect(&last_narrative, &embedder);
                       let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
-                      let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
-                      cortex.step(Some(input_3d));
+                       let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
+                       current_stimulus = Some(echo_vec);
+                       cortex.step(Some(input_3d));
                  } else {
                      cortex.step(None); 
                  }
@@ -518,8 +536,9 @@ async fn main() {
                  input_word = ">>".to_string();
                  chunk_ptr += 5; // Skip 5 chunks (~320 tokens)
                  if chunk_ptr >= preembedded.len() { chunk_ptr = 0; } 
-                 body.energy = (body.energy - 0.01).max(0.0);
-                 cortex.step(None);
+                  body.energy = (body.energy - 0.01).max(0.0);
+                  current_stimulus = None;
+                  cortex.step(None);
              },
              
              Action::Read => {
@@ -533,17 +552,33 @@ async fn main() {
                 // 2. Read semantic chunk (64 tokens at once)
                 if chunk_ptr < preembedded.len() {
                     let emb = &preembedded[chunk_ptr];
+                    current_stimulus = Some(emb.clone());
                     input_word = format!("[chunk:{}]", chunk_ptr);
                     
                     let emb_vec = emb.to_vec();
                     let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
+                    
+                    // MEMORY RECALL: Bias natural frequencies with past successes
+                    if let Some(past_freqs) = memory.recall(emb) {
+                        let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
+                        let current_arr = Array1::from(current_freqs);
+                        // Soft-blend: 90% current, 10% past
+                        let blended = (&current_arr * 0.9) + (&past_freqs * 0.1);
+                        cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
+                        metrics.record_memory_recall();
+                        if step % 20 == 0 {
+                            println!("   [Memory] Recalled past context! Biasing learning...");
+                        }
+                    }
+
                     let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                     
                     let final_input = input_3d.add(bias_3d);
                     cortex.step(Some(final_input));
                     
                     // APPROACH 3: Hebbian weight learning - modify brain based on input
-                    cortex.hebbian_learn(&emb_vec, 0.001); // Small learning rate
+                    // RELAXED (Cooling): Lower rate to prevent over-specialization (1e-4)
+                    cortex.hebbian_learn(&emb_vec, 0.0001); 
                     
                     // Energy cost scaled by window size (64 tokens worth)
                     body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
@@ -597,21 +632,33 @@ async fn main() {
             
             // Interpretation
             let output_arr = Array1::from(cortical_out);
-            let mut best_concept = "Void";
+            // RICH INTERPRETATION: Use Top-K decoding for concept diversity
+            // RICH INTERPRETATION: Use Top-K decoding for concept diversity
+            let top_k = embedder.decode_top_k(&output_arr, 5);
+            
+            let mut best_concept = "Void".to_string();
             let mut best_score = 0.0;
             
-            // Match against concepts using NORMALIZED cosine similarity
-            // This makes the score scale-invariant (0.0 to 1.0)
+            if !top_k.is_empty() {
+                best_concept = top_k[0].0.clone();
+                best_score = top_k[0].1;
+                
+                // Track concepts seen
+                for (name, _) in &top_k {
+                    metrics.record_concept(name);
+                }
+            }
+
+            // Also keep original concept memory match for backward compatibility/stability
             let output_norm = (output_arr.dot(&output_arr)).sqrt().max(1e-8);
             let output_normalized = &output_arr / output_norm;
-            
             for (name, vec) in &concept_memory {
                 let vec_norm = (vec.dot(vec)).sqrt().max(1e-8);
                 let vec_normalized = vec / vec_norm;
                 let score = output_normalized.dot(&vec_normalized);
                 if score.abs() > best_score {
                     best_score = score.abs();
-                    best_concept = name;
+                    best_concept = name.to_string();
                 }
             }
             // Also match against current input word?
@@ -623,21 +670,34 @@ async fn main() {
             // APPROACH 2: Lowered threshold from 0.8 to 0.3 for faster learning
             if best_score < 0.3 && sum_e > 0.3 && input_word.len() > 2 && input_word != "<unk>" && !input_word.starts_with("[") {
                  concept_memory.push((input_word.clone(), output_arr.clone()));
-                 metrics.record_concept_learned();
+                 metrics.record_concept_learned(input_word.as_str(), step);
                  // Update best_concept immediately for this step
-                 best_concept = &concept_memory.last().unwrap().0;
+                 best_concept = input_word.clone();
                  best_score = 1.0; 
+            }
+
+            // MEMORY STORAGE: "Aha!" moment storage
+            if best_score > 0.45 && best_concept.len() > 3 && !best_concept.starts_with("[") {
+                if let Some(stim) = &current_stimulus { 
+                    let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
+                    if memory.store(stim, &Array1::from(current_freqs), best_score, step) {
+                        metrics.record_memory_store();
+                        if step % 10 == 0 {
+                            println!("   [Memory] Stored high-coherence state: '{}' ({:.2})", best_concept, best_score);
+                        }
+                    }
+                }
             }
             
             // Record learning metrics
-            metrics.record_concept(best_concept);
+            metrics.record_concept(&best_concept);
             metrics.record_coherence(best_score, step);
             metrics.record_energy(body.energy);
             metrics.record_action(action == Action::Read);
 
             // --- EMBODIMENT LOOP (Refined) ---
             // 1. Concept-based Valence (Safety/Danger)
-            let mut env_valence = match best_concept {
+            let mut env_valence = match best_concept.as_str() {
                 "Safety" => 0.2, 
                 "Danger" => -0.3,
                 _ => 0.0,
@@ -672,12 +732,17 @@ async fn main() {
                  let cortical_out = cortex.get_cortical_output();
                  let state_vec = Array1::from(cortical_out);
                  current_memory_event = Some(state_vec.to_vec());
-                 episodic_buffer.add(state_vec, best_concept.to_string(), body.pleasure_pain);
+                 episodic_buffer.add(state_vec, best_concept.clone(), body.pleasure_pain);
             }
             // -----------------------
 
-            let concepts = vec![(best_concept, best_score)];
-            let narrative = interpreter.interpret(&concepts, confidence);
+            let concepts_refs: Vec<(&str, f32)> = if !top_k.is_empty() {
+                top_k.iter().map(|(s, f)| (s.as_str(), *f)).collect()
+            } else {
+                vec![(best_concept.as_str(), best_score)]
+            };
+            
+            let narrative = interpreter.interpret(&concepts_refs, confidence);
             last_narrative = narrative.clone();
 
             // Only print benchmark at regular intervals (reduces terminal clutter)
@@ -686,7 +751,7 @@ async fn main() {
                 
                 // FILE PROBE: Write current state to probe.json for external monitoring
                 let probe_data = format!(
-                    r#"{{"step":{},"coherence":{:.4},"diversity":{:.4},"concepts_learned":{},"energy_stability":{:.3},"read_steps":{},"dream_steps":{},"chunk_ptr":{},"book_chunks":{}}}"#,
+                    r#"{{"step":{},"coherence":{:.4},"diversity":{:.4},"concepts_learned":{},"energy_stability":{:.3},"read_steps":{},"dream_steps":{},"mem_stores":{},"mem_recalls":{},"chunk_ptr":{},"book_chunks":{}}}"#,
                     step, 
                     metrics.avg_coherence(),
                     metrics.concept_diversity(),
@@ -694,6 +759,8 @@ async fn main() {
                     metrics.energy_stability(),
                     metrics.read_steps,
                     metrics.dream_steps,
+                    metrics.memory_stores,
+                    metrics.memory_recalls,
                     chunk_ptr,
                     preembedded.len()
                 );
