@@ -38,6 +38,7 @@ pub struct HarmonicBdhBurn<B: Backend> {
     pub usage: Tensor<B, 1>,
     pub fatigue_rate: f32,
     pub inhibition_factor: f32,
+    pub coupling_strength: f32,
 }
 
 impl<B: Backend> HarmonicBdhBurn<B> {
@@ -95,6 +96,7 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             usage,
             fatigue_rate: 0.005,
             inhibition_factor: 0.2,
+            coupling_strength: 0.01, // Subtle coupling for ensemble formation
         }
     }
 
@@ -169,6 +171,20 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         
         let mut d_real = d_real.sub(real.clone().mul(d.clone()));
         let mut d_imag = d_imag.sub(imag.clone().mul(d));
+
+        // PHASE COHERENCE: Mean-Field Coupling (Kuramoto-style)
+        // Extract first layer/mode for global bias
+        if self.coupling_strength > 0.0 {
+            let mean_real = real.clone().mean_dim(2); // [Layers, Modes, 1]
+            let mean_imag = imag.clone().mean_dim(2);
+            
+            // Influence pulls oscillators toward the ensemble average
+            let coupling_bias_real = mean_real.sub(real.clone()).mul_scalar(self.coupling_strength);
+            let coupling_bias_imag = mean_imag.sub(imag.clone()).mul_scalar(self.coupling_strength);
+            
+            d_real = d_real.add(coupling_bias_real);
+            d_imag = d_imag.add(coupling_bias_imag);
+        }
 
         // Van der Pol Self-Excitation
         // dX += mu * X * (1 - r^2)
@@ -299,6 +315,44 @@ impl<B: Backend> HarmonicBdhBurn<B> {
     pub fn get_usage_vec(&self) -> Vec<f32> {
         self.usage.to_data().to_vec::<f32>().unwrap()
     }
+
+    /// Synaptic Scaling: Weakens over-active "noise" neurons 
+    /// and strengthens stable "semantic" neurons.
+    pub fn consolidate_synapses(&mut self) {
+        let n = self.n;
+        let device = self.natural_freq.device();
+        
+        // Calculate global average usage
+        let avg_tensor = self.usage.clone().mean();
+        let global_usage_avg = avg_tensor.clone().into_data().iter::<f32>().next().unwrap_or(0.0);
+        
+        // Prepare thresholds as tensors for comparison
+        let threshold_down = Tensor::<B, 1>::full([n], global_usage_avg * 1.5, &device);
+        let threshold_up_high = Tensor::<B, 1>::full([n], global_usage_avg, &device);
+        let threshold_up_low = Tensor::<B, 1>::full([n], 0.01, &device);
+        
+        // 1. Identification Masks
+        let over_active_mask = self.usage.clone().greater_equal(threshold_down).float();
+        
+        // Stable but quiet: 0.01 < usage < avg
+        // Using multiplication as logical AND for float masks
+        let quiet_mask = self.usage.clone().greater_equal(threshold_up_low).float()
+            .mul(self.usage.clone().lower(threshold_up_high).float());
+            
+        // 2. Build scaling tensor: 1.0 - (over_active * 0.05) + (quiet * 0.005)
+        let scale = Tensor::<B, 1>::full([n], 1.0, &device)
+            .sub(over_active_mask.clone().mul_scalar(0.05))
+            .add(quiet_mask.mul_scalar(0.005));
+            
+        // 3. Apply to natural_freq
+        self.natural_freq = self.natural_freq.clone().mul(scale).clamp(0.01, 10.0);
+        
+        // 4. USAGE RESET: Refresh capacity of consolidated neurons
+        // We partially reset the fatigue for over-active neurons that were scaled
+        let usage_scale = Tensor::<B, 1>::full([n], 1.0, &device)
+            .sub(over_active_mask.mul_scalar(0.1)); // 10% reset
+        self.usage = self.usage.clone().mul(usage_scale);
+    }
     
     /// Get the current state (Real part of first layer) for interpretation.
     /// Returns [Neurons] Vector.
@@ -307,6 +361,19 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             .slice([0..1, 0..1, 0..self.n, 0..1])
             .reshape([self.n])
             .to_data().to_vec::<f32>().unwrap()
+    }
+
+    /// Get the phases of the oscillators (Fundamental Layer, Fundamental Mode).
+    /// Returns Vec<f32> of size N.
+    pub fn get_phases(&self) -> Vec<f32> {
+        let real = self.rho.clone().slice([0..1, 0..1, 0..self.n, 0..1]).reshape([self.n]).to_data().to_vec::<f32>().unwrap();
+        let imag = self.rho.clone().slice([0..1, 0..1, 0..self.n, 1..2]).reshape([self.n]).to_data().to_vec::<f32>().unwrap();
+        
+        let mut phases = Vec::with_capacity(self.n);
+        for i in 0..self.n {
+            phases.push(imag[i].atan2(real[i]));
+        }
+        phases
     }
 
     /// Get normalized cortical output as an ndarray for similarity matching.

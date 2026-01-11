@@ -94,8 +94,8 @@ use tokenizers::pre_tokenizers::whitespace::Whitespace;
 /// Embedder: tokenizes text and projects to neuron-dimensional space.
 /// Uses HuggingFace Tokenizers BPE for scalable vocabulary.
 pub struct Embedder {
-    tokenizer: Tokenizer,
-    projection: Array2<f32>,   // vocab_size x n
+    pub tokenizer: Tokenizer,
+    pub projection: Array2<f32>,   // vocab_size x n
     pub vocab_size: usize,
     pub n: usize,
 }

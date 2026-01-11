@@ -149,7 +149,7 @@ impl LearningMetrics {
     
     fn record_concept_learned(&mut self, concept: &str, _step: usize) {
         if !self.concept_counts.contains_key(concept) {
-             // Smart count: Only count as "learned" if it's meaningful
+             // Synaptic Scaling Filter: Only count tokens > 3 chars as a "Learned Concept"
              if concept.len() > 3 && !concept.starts_with("[") {
                 self.concepts_now += 1;
              }
@@ -479,6 +479,17 @@ async fn main() {
                     if let Some(mem) = episodic_buffer.sample() {
                          input_word = format!("*{}*", mem.concept);
                          current_stimulus = Some(mem.embedding.clone());
+                         
+                         // LOOSE ASSOCIATION: Apply past bias during dreaming
+                         memory.recall_threshold = 0.55; 
+                         if let Some(past_freqs) = memory.recall(&mem.embedding) {
+                             let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
+                             let current_arr = Array1::from(current_freqs);
+                             let blended = (&current_arr * 0.9) + (&past_freqs * 0.1);
+                             cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
+                             metrics.record_memory_recall();
+                         }
+
                          Tensor::<Backend, 1>::from_floats(mem.embedding.to_vec().as_slice(), &device)
                     } else {
                         // Fallback to Chaining
@@ -526,6 +537,12 @@ async fn main() {
                        let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                        current_stimulus = Some(echo_vec);
                        cortex.step(Some(input_3d));
+
+                       // DREAM CONSOLIDATION: Periodic Synaptic Scaling
+                       if step % 500 == 0 {
+                            cortex.consolidate_synapses();
+                            println!("   [Dream] Synaptic Scaling: Consolidating learned patterns...");
+                       }
                  } else {
                      cortex.step(None); 
                  }
@@ -558,7 +575,8 @@ async fn main() {
                     let emb_vec = emb.to_vec();
                     let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
                     
-                    // MEMORY RECALL: Bias natural frequencies with past successes
+                    // MEMORY RECALL: Contextual Bias (Strict during reading)
+                    memory.recall_threshold = 0.65;
                     if let Some(past_freqs) = memory.recall(emb) {
                         let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
                         let current_arr = Array1::from(current_freqs);
@@ -576,9 +594,9 @@ async fn main() {
                     let final_input = input_3d.add(bias_3d);
                     cortex.step(Some(final_input));
                     
-                    // APPROACH 3: Hebbian weight learning - modify brain based on input
-                    // RELAXED (Cooling): Lower rate to prevent over-specialization (1e-4)
-                    cortex.hebbian_learn(&emb_vec, 0.0001); 
+                    // Synaptic Consolidation: Reduced LR during dreaming/reading overlap
+                    let lr = if action == Action::Dream { 0.00001 } else { 0.0001 };
+                    cortex.hebbian_learn(&emb_vec, lr); 
                     
                     // Energy cost scaled by window size (64 tokens worth)
                     body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
@@ -630,51 +648,34 @@ async fn main() {
             let max_entropy = (layers as f32).ln().max(1.0);
             let confidence = (1.0 - (entropy / max_entropy)).max(0.0).min(1.0);
             
-            // Interpretation
-            let output_arr = Array1::from(cortical_out);
-            // RICH INTERPRETATION: Use Top-K decoding for concept diversity
-            // RICH INTERPRETATION: Use Top-K decoding for concept diversity
-            let top_k = embedder.decode_top_k(&output_arr, 5);
+            // RICH INTERPRETATION: Use Ensemble decoding for conceptual linking
+            let phases = cortex.get_phases();
+            let usage = cortex.get_usage_vec();
+            let ensemble_concepts = interpreter.interpret_ensemble(
+                &cortical_out, 
+                &phases, 
+                &usage, 
+                &embedder.projection,
+                &embedder
+            );
             
             let mut best_concept = "Void".to_string();
             let mut best_score = 0.0;
             
-            if !top_k.is_empty() {
-                best_concept = top_k[0].0.clone();
-                best_score = top_k[0].1;
+            if !ensemble_concepts.is_empty() {
+                best_concept = ensemble_concepts[0].0.clone();
+                best_score = ensemble_concepts[0].1;
                 
-                // Track concepts seen
-                for (name, _) in &top_k {
+                // Track concepts found in ensembles
+                for (name, _) in &ensemble_concepts {
                     metrics.record_concept(name);
                 }
             }
 
-            // Also keep original concept memory match for backward compatibility/stability
-            let output_norm = (output_arr.dot(&output_arr)).sqrt().max(1e-8);
-            let output_normalized = &output_arr / output_norm;
-            for (name, vec) in &concept_memory {
-                let vec_norm = (vec.dot(vec)).sqrt().max(1e-8);
-                let vec_normalized = vec / vec_norm;
-                let score = output_normalized.dot(&vec_normalized);
-                if score.abs() > best_score {
-                    best_score = score.abs();
-                    best_concept = name.to_string();
-                }
-            }
-            // Also match against current input word?
-            // "Learning": If confidence is high but concept is unknown, make new concept.
-            
-            // Self-Discovery / Association
-            // If we have high energy (focus) but don't recognize the pattern (low score),
-            // we should associate the *Current Input Word* with this Brain State.
-            // APPROACH 2: Lowered threshold from 0.8 to 0.3 for faster learning
-            if best_score < 0.3 && sum_e > 0.3 && input_word.len() > 2 && input_word != "<unk>" && !input_word.starts_with("[") {
-                 concept_memory.push((input_word.clone(), output_arr.clone()));
-                 metrics.record_concept_learned(input_word.as_str(), step);
-                 // Update best_concept immediately for this step
-                 best_concept = input_word.clone();
-                 best_score = 1.0; 
-            }
+            // Narrative generation
+            let narrative = interpreter.generate_narrative(&ensemble_concepts, confidence);
+            last_narrative = narrative.clone();
+            input_word = narrative; // Update input_word for display/reflection
 
             // MEMORY STORAGE: "Aha!" moment storage
             if best_score > 0.45 && best_concept.len() > 3 && !best_concept.starts_with("[") {
@@ -736,14 +737,6 @@ async fn main() {
             }
             // -----------------------
 
-            let concepts_refs: Vec<(&str, f32)> = if !top_k.is_empty() {
-                top_k.iter().map(|(s, f)| (s.as_str(), *f)).collect()
-            } else {
-                vec![(best_concept.as_str(), best_score)]
-            };
-            
-            let narrative = interpreter.interpret(&concepts_refs, confidence);
-            last_narrative = narrative.clone();
 
             // Only print benchmark at regular intervals (reduces terminal clutter)
             if step % BENCHMARK_INTERVAL == 0 && step > 0 {
