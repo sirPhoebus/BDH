@@ -1,5 +1,5 @@
 use ndarray::Array1;
-use crate::harmonic::HarmonicBdh;
+
 
 /// The "Inner Voice" of the brain.
 /// Interprets neural states into narrative and feeds them back.
@@ -66,30 +66,31 @@ impl Interpreter {
     }
 
     /// "Hear" the narrative: Map words back to concept vectors.
-    /// This closes the loop.
-    pub fn get_feedback_vector(&self, narrative: &str, brain: &HarmonicBdh) -> Array1<f32> {
-        let mut feedback = Array1::zeros(brain.n);
+    /// Uses the Embedder to map text -> vector.
+    pub fn reflect(&self, narrative: &str, embedder: &crate::data::Embedder) -> Array1<f32> {
+        let mut feedback = Array1::zeros(embedder.n);
+        let mut count = 0.0;
         
-        // Very simple keyword matching for "Hearing"
-        // If the narrative contains a concept name, add its vector.
-        // In reality, this would use the same Embedding encoder as input.
-        
-        // We need access to brain's concept space. 
-        // Assuming HarmonicBdh has a way to lookup concepts.
-        // For now, we'll implement a helper on Brain or just iterate matching names.
-        
-        // Since we can't iterate brain.concepts directly if private, 
-        // we'll rely on a new method `get_concept_vector` in HarmonicBdh.
-        
+        // Extract meaningful words (skip stopwords ideally, but simple split for now)
         let words: Vec<&str> = narrative.split_whitespace()
             .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
+            .filter(|s| s.len() > 3) // Simple filter
             .collect();
 
         for word in words {
-            // Try to find a concept matching this word (case-insensitive approximation)
-            if let Some(vec) = brain.get_concept_vector(word) {
-                feedback += &vec;
+            // Check if word is in vocab
+            let tokens = embedder.tokenize(word);
+            // Tokenize returns <unk> (1) if not found.
+            // We only want to reflect KNOWN concepts.
+            if !tokens.is_empty() && tokens[0] > 1 {
+                let emb = embedder.embed_token(tokens[0]);
+                feedback = feedback + &emb;
+                count += 1.0;
             }
+        }
+        
+        if count > 0.0 {
+            feedback /= count; // Average center
         }
         
         // Normalize
@@ -98,6 +99,6 @@ impl Interpreter {
             feedback /= norm;
         }
         
-        feedback * 0.5 // Feedback strength
+        feedback * 0.3 // Feedback strength (Gain < 1.0 to prevent explosion)
     }
 }

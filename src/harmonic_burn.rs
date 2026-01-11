@@ -30,6 +30,8 @@ pub struct HarmonicBdhBurn<B: Backend> {
     
     // Config
     base_dt: f32,
+    pub noise_scale: f32,
+    pub input_gain: f32,
 }
 
 impl<B: Backend> HarmonicBdhBurn<B> {
@@ -46,7 +48,7 @@ impl<B: Backend> HarmonicBdhBurn<B> {
 
         // Initialize Layer Frequencies (Exponential)
         let layer_freq_data: Vec<f32> = (0..num_layers)
-            .map(|l| 5.0 * (2.0_f32).powf(l as f32 * 3.0 / num_layers as f32))
+            .map(|l| 1.0 * (2.0_f32).powf(l as f32 * 3.0 / num_layers as f32))
             .collect();
         let layer_freq = Tensor::<B, 1>::from_floats(layer_freq_data.as_slice(), device);
 
@@ -78,8 +80,20 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             natural_freq,
             layer_freq,
             damping,
-            base_dt: 0.05,
+            base_dt: 0.01,
+            noise_scale: 0.0,
+            input_gain: 1.0,
         }
+    }
+
+    /// Set the noise scale for stochastic injection.
+    pub fn set_noise(&mut self, scale: f32) {
+        self.noise_scale = scale;
+    }
+
+    /// Set input gain (plasticity/sensitivity).
+    pub fn set_input_gain(&mut self, gain: f32) {
+        self.input_gain = gain;
     }
 
     /// Step the dynamics forward using Euler integration on the GPU.
@@ -125,8 +139,21 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         if let Some(inp) = input {
             // inp is [Layers, Modes, Neurons] ? Or just [Neurons] broadcasted?
             // Let's assume [Layers, Modes, Neurons] for full control.
-            d_real = d_real.add(inp);
+            // Apply Input Gain (Plasticity/Attention)
+            let gained_inp = inp.mul_scalar(self.input_gain);
+            d_real = d_real.add(gained_inp);
         }
+
+        // Noise Injection (Langevin-like dynamics)
+        if self.noise_scale > 0.0 {
+            // Generate noise: [Layers, Modes, Neurons]
+            // We apply it to derivative (stochastic differential equation)
+            // Scale by sqrt(dt) for proper Brownian scaling, but simple scale works for now.
+            let noise_dist = burn::tensor::Distribution::Normal(0.0, self.noise_scale as f64);
+            let noise = Tensor::<B, 3>::random(d_real.shape(), noise_dist, &self.rho.device());
+            d_real = d_real.add(noise);
+        }
+
         
         // Update State (Euler)
         // Real += dReal * dt

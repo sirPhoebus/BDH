@@ -218,6 +218,40 @@ impl Embedder {
         // Apply ReLU with negative bias for sparsity
         embeddings.mapv(|v| (v - sparsity_bias).max(0.0))
     }
+    
+    /// Decode finding the nearest token to the given vector (Cosine Similarity).
+    /// Returns (Token, Similarity).
+    pub fn decode_nearest(&self, query_vec: &Array1<f32>) -> (String, f32) {
+        let mut best_sim = -1.0;
+        let mut best_token = "<unk>".to_string();
+        
+        // Normalize query
+        let q_norm = query_vec.dot(query_vec).sqrt();
+        if q_norm < 1e-6 {
+            return ("Void".to_string(), 0.0);
+        }
+        
+        // Brute-force search (slow but effective for 5000 tokens)
+        for (token, &id) in &self.vocab {
+            let id = id as usize;
+            if id >= self.projection.nrows() { continue; }
+            
+            let emb = self.projection.row(id);
+            // Sim = A . B / (|A|*|B|)
+            // Projection rows are random normal, len approx 1.0 but not exactly.
+            let dot = emb.dot(query_vec);
+            let emb_norm = emb.dot(&emb).sqrt();
+            
+            let sim = dot / (q_norm * emb_norm);
+            
+            if sim > best_sim {
+                best_sim = sim;
+                best_token = token.clone();
+            }
+        }
+        
+        (best_token, best_sim)
+    }
 }
 
 /// Data acquisition: download Project Gutenberg texts.

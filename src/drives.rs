@@ -54,4 +54,34 @@ impl Drives {
             None
         }
     }
+
+    /// Get modulation parameters for the brain based on current drives.
+    pub fn get_modulation(&self) -> BrainModulation {
+        let dominant = self.get_dominant_drive();
+        
+        match dominant.as_deref() {
+            Some("HUNGER") => BrainModulation {
+                damping_target: 0.8,  // Alert, searching
+                noise_bias: 0.01,     // Focused
+                label: "Seeking".to_string(),
+            },
+            Some("CURIOSITY") => BrainModulation {
+                damping_target: 0.7,  // Flexible, plastic
+                noise_bias: 0.05,     // High exploration
+                label: "Playing".to_string(),
+            },
+            _ => BrainModulation {
+                damping_target: 0.95, // Resting / Consolidation
+                noise_bias: 0.0,      // Quiet
+                label: "Resting".to_string(),
+            },
+        }
+    }
+}
+
+/// Modulation parameters for the neural substrate.
+pub struct BrainModulation {
+    pub damping_target: f32,
+    pub noise_bias: f32,
+    pub label: String,
 }

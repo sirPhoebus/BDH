@@ -13,6 +13,14 @@ pub struct BodyState {
     /// Valence signal (-1.0 to 1.0).
     /// Positive = Pleasure/Reward. Negative = Pain/Punishment.
     /// Decays towards 0.0 over time.
+    /// Arousal level (0.0 to 1.0).
+    /// Represents overall activation/stress.
+    /// Modulates plasticity (input gain).
+    pub arousal: f32,
+
+    /// Valence signal (-1.0 to 1.0).
+    /// Positive = Pleasure/Reward. Negative = Pain/Punishment.
+    /// Decays towards 0.0 over time.
     pub pleasure_pain: f32,
 }
 
@@ -22,6 +30,7 @@ impl BodyState {
             energy: 1.0,
             integrity: 1.0,
             pleasure_pain: 0.0,
+            arousal: 0.5,
         }
     }
 
@@ -40,7 +49,15 @@ impl BodyState {
         // New feedback overrides/mixes with current state
         self.pleasure_pain = 0.7 * self.pleasure_pain + 0.3 * env_valence;
 
-        // 3. Integrity impact
+        // 3. Update Arousal
+        // High stress (negative valence) -> High Arousal
+        // Low energy -> Low Arousal (Sleepy)
+        // High energy + Novelty (implied) -> High Arousal
+        let stress = if self.pleasure_pain < 0.0 { self.pleasure_pain.abs() * 2.0 } else { 0.0 };
+        let target_arousal = (self.energy * 0.7) + (stress * 0.3);
+        self.arousal = 0.9 * self.arousal + 0.1 * target_arousal;
+
+        // 4. Integrity impact
         if env_valence < -0.5 {
             // Strong pain causes damage
             let damage = env_valence.abs() * 0.05;
