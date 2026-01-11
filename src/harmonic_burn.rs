@@ -105,28 +105,20 @@ impl<B: Backend> HarmonicBdhBurn<B> {
     pub fn modulate_neurochem(&mut self, da: f32, ne: f32, ach: f32) {
         
         // ACh: Cholinergic modulation controls "Signal to Noise".
-        // High ACh = High Input Gain (Focused on world).
-        // Low ACh = Low Input Gain (Focused on internal/dream).
-        self.set_input_gain(ach.max(0.1));
+        // STABILITY FIX: Clamp input gain to prevent overshoot
+        self.set_input_gain(ach.clamp(0.1, 0.5)); // Was: ach.max(0.1) - now capped
         
-        // NE: Noradrenergic modulation controls global excitability/noise.
-        // High NE = High Noise (Search/Panic/Alert).
-        // Low NE = Low Noise (Calm).
-        self.noise_scale = 0.005 + (ne * 0.05);
+        // NE: Noradrenergic modulation - REDUCED noise scale
+        self.noise_scale = 0.001 + (ne * 0.02); // Was: 0.005 + ne*0.05
         
-        // DA: Dopaminergic modulation controls "Gating" / Resonance.
-        // High DA = High Self-Excitation (Lock onto reward/thought).
-        // Low DA = Low Self-Excitation (Apathy/Drift).
-        self.self_excitation = da * 0.1; // Scale to appropriate physics range
+        // DA: REDUCED self-excitation to prevent runaway
+        self.self_excitation = da * 0.02; // Was: da * 0.1
         
-        // Damping: Inverse of Energy/ACh?
-        // If High ACh (Awake), standard damping.
-        // If Low ACh (Asleep), less damping (oscillations persist)? Or more?
-        // Usually sleep = synchrony.
+        // INCREASED damping for stability (faster energy dissipation)
         if ach < 0.2 {
-             self.set_damping(0.98); // Sleep damping
+             self.set_damping(0.92); // Sleep: was 0.98
         } else {
-             self.set_damping(0.95); // Wake damping
+             self.set_damping(0.85); // Wake: was 0.95 (MORE damping = more stable)
         }
     }
 
@@ -233,6 +225,35 @@ impl<B: Backend> HarmonicBdhBurn<B> {
     /// Multiply layer frequencies by a scalar factor (e.g. for Sleep/Wake).
     pub fn modulate_frequencies(&mut self, factor: f32) {
          self.layer_freq = self.layer_freq.clone().mul_scalar(factor);
+    }
+    
+    /// APPROACH 3: Hebbian weight update - modifies natural frequencies based on input correlation.
+    /// "Neurons that fire together, wire together"
+    /// Input: the embedding being injected [Neurons], learning_rate: 0.0 to 1.0
+    pub fn hebbian_learn(&mut self, input: &[f32], learning_rate: f32) {
+        if input.len() != self.n || learning_rate <= 0.0 { return; }
+        
+        // Get current activations
+        let output = self.get_cortical_output();
+        
+        // Calculate correlation: input * output (Hebb rule: delta_w = lr * pre * post)
+        // We modify natural_freq to shift resonance toward input patterns
+        let mut freq_delta = Vec::with_capacity(self.n);
+        for i in 0..self.n {
+            // Correlation: positive if both active, shifts frequency toward input
+            let correlation = input[i] * output[i];
+            freq_delta.push(correlation * learning_rate);
+        }
+        
+        // Apply frequency shift (neurons that correlate shift their tuning)
+        let current_freq = self.natural_freq.to_data().to_vec::<f32>().unwrap();
+        let new_freq: Vec<f32> = current_freq.iter()
+            .zip(freq_delta.iter())
+            .map(|(f, d)| (f + d).clamp(0.1, 10.0)) // Clamp to valid range
+            .collect();
+        
+        let device = self.natural_freq.device();
+        self.natural_freq = Tensor::<B, 1>::from_floats(new_freq.as_slice(), &device);
     }
     
     /// Get the current state (Real part of first layer) for interpretation.

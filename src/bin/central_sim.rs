@@ -1,4 +1,5 @@
 use bdh_model::harmonic_burn::HarmonicBdhBurn;
+use bdh_model::data::acquisition::{download_gutenberg_book, GUTENBERG_IDS};
 use bdh_model::body::BodyState;
 use bdh_model::drives::Drives;
 use bdh_model::interpreter::Interpreter;
@@ -539,19 +540,37 @@ async fn main() {
                     let final_input = input_3d.add(bias_3d);
                     cortex.step(Some(final_input));
                     
+                    // APPROACH 3: Hebbian weight learning - modify brain based on input
+                    cortex.hebbian_learn(&emb_vec, 0.001); // Small learning rate
+                    
                     // Energy cost scaled by window size (64 tokens worth)
                     body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
                     chunk_ptr += 1;
                 } else {
                     cortex.step(None);
-                    input_word = "<END>".to_string();
-                    // Book-switching: re-embed next book
-                    if drives.hunger > 0.8 {
-                        current_book_idx = (current_book_idx + 1) % books.len();
-                        let new_tokens = embedder.tokenize(&books[current_book_idx]);
-                        preembedded = embedder.preembed_corpus_parallel(&new_tokens, window_size);
-                        chunk_ptr = 0;
-                        println!("--> Opening Book {} ({} chunks)...", current_book_idx, preembedded.len());
+                    input_word = "<LOADING>".to_string();
+                    
+                    // AUTO BOOK DOWNLOAD: Fetch new book from Gutenberg when content exhausted
+                    let book_idx = (current_book_idx + step) % GUTENBERG_IDS.len();
+                    let book_id = GUTENBERG_IDS[book_idx];
+                    println!("\n--> Finished book! Downloading new book (Gutenberg #{})...", book_id);
+                    
+                    match download_gutenberg_book(book_id, "data/books") {
+                        Ok(path) => {
+                            // Load and embed the new book
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                let new_tokens = embedder.tokenize(&content);
+                                preembedded = embedder.preembed_corpus_parallel(&new_tokens, window_size);
+                                chunk_ptr = 0;
+                                current_book_idx = book_idx;
+                                println!("--> Loaded book {} ({} chunks)", book_id, preembedded.len());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("--> Failed to download book {}: {}", book_id, e);
+                            // Fallback: loop current book
+                            chunk_ptr = 0;
+                        }
                     }
                 }
              }
@@ -579,9 +598,15 @@ async fn main() {
             let mut best_concept = "Void";
             let mut best_score = 0.0;
             
-            // Match against concepts (initially empty or seeded)
+            // Match against concepts using NORMALIZED cosine similarity
+            // This makes the score scale-invariant (0.0 to 1.0)
+            let output_norm = (output_arr.dot(&output_arr)).sqrt().max(1e-8);
+            let output_normalized = &output_arr / output_norm;
+            
             for (name, vec) in &concept_memory {
-                let score = output_arr.dot(vec);
+                let vec_norm = (vec.dot(vec)).sqrt().max(1e-8);
+                let vec_normalized = vec / vec_norm;
+                let score = output_normalized.dot(&vec_normalized);
                 if score.abs() > best_score {
                     best_score = score.abs();
                     best_concept = name;
@@ -656,6 +681,21 @@ async fn main() {
             // Only print benchmark at regular intervals (reduces terminal clutter)
             if step % benchmark_interval == 0 && step > 0 {
                 metrics.print_benchmark(step);
+                
+                // FILE PROBE: Write current state to probe.json for external monitoring
+                let probe_data = format!(
+                    r#"{{"step":{},"coherence":{:.4},"diversity":{:.4},"concepts_learned":{},"energy_stability":{:.3},"read_steps":{},"dream_steps":{},"chunk_ptr":{},"book_chunks":{}}}"#,
+                    step, 
+                    metrics.avg_coherence(),
+                    metrics.concept_diversity(),
+                    metrics.concepts_now,
+                    metrics.energy_stability(),
+                    metrics.read_steps,
+                    metrics.dream_steps,
+                    chunk_ptr,
+                    preembedded.len()
+                );
+                let _ = std::fs::write("probe.json", probe_data);
             }
 
         }
