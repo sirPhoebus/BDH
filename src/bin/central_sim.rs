@@ -20,6 +20,9 @@ use tower_http::services::ServeDir;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 
+const BENCHMARK_INTERVAL: usize = 2000; // APPROACH 6: Adjusted threshold for cleaner logs
+
+
 #[derive(Serialize, Clone)]
 struct BrainStateUpdate {
     energies: Vec<f32>,
@@ -328,7 +331,6 @@ async fn main() {
     
     // Learning quality benchmarks
     let mut metrics = LearningMetrics::new(concept_memory.len());
-    let benchmark_interval = 500; // Print benchmark every N steps
 
     loop {
         step += 1;
@@ -679,7 +681,7 @@ async fn main() {
             last_narrative = narrative.clone();
 
             // Only print benchmark at regular intervals (reduces terminal clutter)
-            if step % benchmark_interval == 0 && step > 0 {
+            if step % BENCHMARK_INTERVAL == 0 && step > 0 {
                 metrics.print_benchmark(step);
                 
                 // FILE PROBE: Write current state to probe.json for external monitoring
