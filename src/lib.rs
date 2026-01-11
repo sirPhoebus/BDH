@@ -12,6 +12,7 @@ pub mod drives;
 pub mod interpreter;
 pub mod harmonic_burn;
 pub mod data;
+pub mod working_memory;
 pub mod memory;
 pub mod training;
 pub mod continual;

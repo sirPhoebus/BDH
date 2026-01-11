@@ -11,6 +11,7 @@ use ndarray::Array1;
 use std::collections::VecDeque;
 use serde::Serialize; // Added Deserialize just in case, but definitely need Chunk
 use bdh_model::data::Chunk; // Import Chunk explicitly
+use bdh_model::working_memory::WorkingMemory;
 use std::process::Command;
 
 
@@ -26,6 +27,26 @@ use std::sync::Arc;
 
 const BENCHMARK_INTERVAL: usize = 10; // Lowered for faster verification
 
+/// Helper: Filter out low-quality concepts (Stopwords, suffixes, short tokens)
+fn is_useful_concept(word: &str) -> bool {
+    let word_lower = word.to_lowercase();
+    // 1. Length Check
+    if word.len() < 3 { return false; } // Revert to > 2 for quality
+    
+    // 2. Stopwords
+    let stopwords = ["the", "and", "that", "have", "for", "with", "you", "this", "but", "his", "from", "they", "we", "say", "her", "she", "or", "an", "will", "my", "one", "all", "would", "there", "their", "what", "so", "up", "out", "if", "about", "who", "get", "which", "go", "me", "when", "make", "can", "like", "time", "no", "just", "him", "know", "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other", "than", "then", "now", "look", "only", "come", "its", "over", "think", "also", "back", "after", "use", "two", "how", "our", "work", "first", "well", "way", "even", "new", "want", "because", "any", "these", "give", "day", "most", "us", "got", "was", "were", "had", "bin", "did", "are", "is", "am"];
+    if stopwords.contains(&word_lower.as_str()) { return false; }
+    
+    // 3. Suffix / Artifact Heuristics
+    // Common BPE artifacts (e.g., 'ing', 'ment', 'tion' if standalone)
+    let suffixes = ["ing", "ment", "tion", "ness", "ity", "ous", "ent", "est", "ist", "ful", "less", "able", "ible", "al", "ic"];
+    if suffixes.contains(&word_lower.as_str()) { return false; }
+    
+    // 4. Special Characters
+    if word.starts_with("[") || word.starts_with("<") || word.contains(|c: char| !c.is_alphanumeric()) { return false; }
+    
+    true
+}
 
 #[derive(Serialize, Clone)]
 struct BrainStateUpdate {
@@ -320,6 +341,10 @@ async fn main() {
     // 7. Hippocampal Memory (Hippocampus)
     println!("7. Memory: Initializing vector store...");
     let mut memory = MemorySystem::new(100);
+    
+    // 6b. Working Memory (Short-Term Context)
+    println!("   Working Memory: Allocating 3 slots...");
+    let mut wm = WorkingMemory::<Backend>::new(3, 0.2); // Capacity 3, Bias Strength 0.2
     // Semantic Grounding: Enrich vocabulary of thoughts
     let concepts_to_add = vec![
         ("Safety", "safety calm secure protect"),
@@ -431,6 +456,10 @@ async fn main() {
              let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
              total_bias_vec = total_bias_vec.add(echo_tensor.mul_scalar(0.1)); // Very weak echo
         }
+
+        // Add Working Memory Context Bias
+        let wm_bias = wm.get_context_bias(n_neurons, &device);
+        total_bias_vec = total_bias_vec.add(wm_bias);
 
         // Expand Bias for Addition
         let bias_3d = total_bias_vec.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
@@ -743,12 +772,13 @@ async fn main() {
                 // Debug why learning stops
                 if step % 200 == 0 {
                     println!("   [Debug] Step {}: Best Match '{}' ({:.4})", step, best_concept, best_score);
+                    println!("   [WM] Context: {}", wm.debug_string());
                 }
 
                 // If still unrecognized, associate the current *Input Stimulus* word as a NEW concept
                 if let Some(word_str) = &current_word {
-                    // AGGRESSIVE TUNING: Threshold 0.01, Length > 2
-                    if best_score < 0.5 && sum_e > 0.01 && word_str.len() > 2 && word_str != "<unk>" && !word_str.starts_with("[") {
+                    // QUALITY CONTROL: Filter using our helper (Stopwords, Suffixes, Length)
+                    if best_score < 0.5 && sum_e > 0.01 && is_useful_concept(word_str) && word_str != "<unk>" {
                          println!("   [!] LEARNED NEW CONCEPT: '{}' (E={:.4}, Score={:.4})", word_str, sum_e, best_score);
                          concept_memory.push((word_str.clone(), output_arr));
                          metrics.record_concept_learned(word_str.as_str(), step);
@@ -758,6 +788,14 @@ async fn main() {
                 }
             }
             // ----------------------------------------------
+
+            // ----------------------------------------------
+            
+            // 7. Update Working Memory
+            if best_score > 0.4 && best_concept != "Void" && best_concept != "<unk>" {
+                let thought_tensor = Tensor::<Backend, 1>::from_floats(cortical_out.as_slice(), &device);
+                wm.update(best_concept.clone(), thought_tensor);
+            }
 
             // MEMORY STORAGE: "Aha!" moment storage
             if best_score > 0.45 && best_concept.len() > 3 && !best_concept.starts_with("[") {
