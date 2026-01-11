@@ -39,15 +39,15 @@ fig = plt.figure(figsize=(12, 10))
 fig.suptitle('Brain Simulation Telemetry', fontsize=16)
 
 # We'll determine the layout dynamically based on number of fields
-data = None
-while data is None:
+numeric_keys = []
+while not numeric_keys:
     data = read_probe()
-    if data is None:
-        print("Waiting for probe.json to be created/populated...")
+    if data:
+         numeric_keys = [k for k, v in data.items() if k != 'step' and isinstance(v, (int, float))]
+    
+    if not numeric_keys:
+        print("Waiting for data stream to begin...")
         time.sleep(1)
-
-# Filter for numeric keys
-numeric_keys = [k for k, v in data.items() if k != 'step' and isinstance(v, (int, float))]
 num_plots = len(numeric_keys)
 cols = 2
 rows = (num_plots + 1) // 2
@@ -85,14 +85,10 @@ def update(frame):
         return lines.values()
         
     steps.append(current_step)
-    if len(steps) > MAX_POINTS:
-        steps.pop(0)
         
     for key in numeric_keys:
         val = current_data.get(key, 0)
         data_history[key].append(val)
-        if len(data_history[key]) > MAX_POINTS:
-            data_history[key].pop(0)
             
         # Update line data
         lines[key].set_data(steps, data_history[key])

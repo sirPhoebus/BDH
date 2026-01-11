@@ -786,13 +786,26 @@ impl HarmonicBdh {
         let total_energy: f32 = energies.iter().sum();
         let avg_freq = self.get_dominant_frequencies(0).mean().unwrap_or(0.0);
         
-        if total_energy < 0.05 {
+        // Normalize thresholds by network size (n * d * layers)
+        // Base thresholds were tuned for n=32, d=8, layers=2
+        let base_size = 32.0 * 8.0 * 2.0;
+        let current_size = (self.n * self.d * self.num_layers) as f32;
+        // Use log scaling for very gentle growth: log2(ratio) capped
+        let ratio = current_size / base_size;
+        let scale = 1.0 + (ratio.ln() / 4.0).max(0.0); // ~1.0 for small, ~2.2 for 256*64*3
+        
+        let resting_threshold = 0.05 * scale;
+        let low_threshold = 0.1 * scale;
+        let med_threshold = 0.2 * scale;
+        let layer0_threshold = 0.3 * scale;
+        
+        if total_energy < resting_threshold {
             ThoughtState::Resting
-        } else if avg_freq < 6.0 && energies.get(0).unwrap_or(&0.0) > &0.3 {
+        } else if avg_freq < 6.0 && energies.get(0).unwrap_or(&0.0) > &layer0_threshold {
             ThoughtState::Contemplative
-        } else if avg_freq > 15.0 && total_energy > 0.2 {
+        } else if avg_freq > 15.0 && total_energy > med_threshold {
             ThoughtState::AlertScanning
-        } else if total_energy > 0.1 {
+        } else if total_energy > low_threshold {
             ThoughtState::ActivePlanning
         } else {
             ThoughtState::Transitioning
@@ -1233,6 +1246,7 @@ impl HarmonicBdh {
             let thought_state = self.classify_thought_state(&energies);
             let top_concepts = self.get_top_concepts(&output, 3);
             let total_energy: f32 = energies.iter().sum();
+            let dominant_freq = self.get_dominant_frequencies(0).mean().unwrap_or(0.0);
             
             trajectory.push(ReflectionStep {
                 step,
@@ -1244,6 +1258,7 @@ impl HarmonicBdh {
                 total_energy,
                 thermal_contribution: self.config.thermal_noise,
                 recall_event,
+                dominant_freq,
             });
         }
         
@@ -1338,6 +1353,7 @@ pub struct ReflectionStep {
     pub total_energy: f32,
     pub thermal_contribution: f32,
     pub recall_event: Option<String>,
+    pub dominant_freq: f32,
 }
 
 /// Rich output from a daydream step.

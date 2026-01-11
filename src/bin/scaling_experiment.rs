@@ -55,6 +55,7 @@ struct ExperimentMetrics {
     energy_max: f32,
     energy_sum: f32,
     zero_energy_steps: usize,
+    freq_sum: f32,
 }
 
 fn main() {
@@ -142,6 +143,9 @@ fn main() {
             metrics.spontaneous_recalls += 1;
         }
 
+        // Frequency tracking
+        metrics.freq_sum += step.dominant_freq;
+
         // Concept tracking
         if !step.top_concepts.is_empty() {
             let concept = step.top_concepts[0].0.to_string();
@@ -178,7 +182,7 @@ fn main() {
     let mut states: Vec<_> = metrics.state_counts.iter().collect();
     states.sort_by(|a, b| b.1.cmp(a.1));
     for (state, count) in &states {
-        let pct = (*count as f32 / args.steps as f32) * 100.0;
+        let pct = (**count as f32 / args.steps as f32) * 100.0;
         let bar_len = (pct / 2.0) as usize;
         let bar = "█".repeat(bar_len);
         println!("  {:30} {:5.1}% {}", state, pct, bar);
@@ -202,9 +206,11 @@ fn main() {
 
     println!("ENERGY STATISTICS:");
     let avg_energy = metrics.energy_sum / args.steps as f32;
+    let avg_freq = metrics.freq_sum / args.steps as f32;
     println!("  Min: {:.4}", metrics.energy_min);
     println!("  Avg: {:.4}", avg_energy);
     println!("  Max: {:.4}", metrics.energy_max);
+    println!("  Avg Dominant Freq: {:.2} Hz", avg_freq);
     println!("  Zero-energy steps: {} ({:.2}%)", 
         metrics.zero_energy_steps,
         metrics.zero_energy_steps as f32 / args.steps as f32 * 100.0);

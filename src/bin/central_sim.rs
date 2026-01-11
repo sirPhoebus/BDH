@@ -705,9 +705,9 @@ async fn main() {
             input_word = narrative; // Update input_word for display/reflection
 
             // --- SELF-DISCOVERY & ASSOCIATIVE LEARNING ---
-            // If the ensemble decoding is weak (best_score < 0.3) but internal focus is high (sum_e > 0.3),
+            // If the ensemble decoding is weak (best_score < 0.5) but internal focus is high (sum_e > 0.3),
             // we first check our associative memory for a past match.
-            if best_score < 0.3 {
+            if best_score < 0.5 {
                 let output_arr = Array1::from(cortical_out.clone());
                 let output_norm = (output_arr.dot(&output_arr)).sqrt().max(1e-8);
                 let output_normalized = &output_arr / output_norm;
@@ -724,7 +724,7 @@ async fn main() {
 
                 // If still unrecognized, associate the current *Input Stimulus* word as a NEW concept
                 if let Some(word_str) = &current_word {
-                    if best_score < 0.3 && sum_e > 0.3 && word_str.len() > 3 && word_str != "<unk>" && !word_str.starts_with("[") {
+                    if best_score < 0.5 && sum_e > 0.3 && word_str.len() > 3 && word_str != "<unk>" && !word_str.starts_with("[") {
                         // println!("   [Learning] Associated Word '{}' with new brain state.", word_str);
                         concept_memory.push((word_str.clone(), output_arr));
                         metrics.record_concept_learned(word_str.as_str(), step);
