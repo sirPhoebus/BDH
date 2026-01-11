@@ -8,6 +8,7 @@
 //! - **Cross-Frequency Coupling**: Lower layers modulate higher layer amplitudes (theta-gamma)
 //! - **Homeostatic Plasticity**: Dynamic damping prevents runaway activation
 //! - **Adaptive Exploration**: Noise increases during low-energy periods (boredom → exploration)
+//! - **Motivational Core**: Explicit drives (Safety, Curiosity, Energy) guide behavior.
 
 use ndarray::prelude::*;
 use num_complex::Complex32;
@@ -95,7 +96,66 @@ impl Default for BiologicalConfig {
             time_encoding_base: 10000.0,  // Base for positional encoding
         }
     }
+
+
+/// (Phase 2) Physiological Drives that motivate behavior.
+#[derive(Clone, Debug)]
+pub struct HomeostaticDrives {
+    /// 1.0 = Safe, 0.0 = Panic. Decays when threatened.
+    pub safety: f32,
+    /// 1.0 = Maximum Boredom, 0.0 = Satisfied. Increases over time.
+    pub curiosity: f32,
+    /// 1.0 = Full Energy, 0.0 = Exhausted. Decays with action.
+    pub energy: f32,
 }
+
+impl Default for HomeostaticDrives {
+    fn default() -> Self {
+        Self {
+            safety: 1.0,    // Start feeling safe
+            curiosity: 0.5, // Start somewhat curious
+            energy: 1.0,    // Start fully rested
+        }
+    }
+}
+
+impl HomeostaticDrives {
+    /// Update drives based on experience.
+    pub fn update(&mut self, is_safe: bool, surprise: f32, action_cost: f32) {
+        // Safety: Decays rapidly in danger, recovers slowly in safety
+        if is_safe {
+            self.safety = (self.safety + 0.02).min(1.0);
+        } else {
+            self.safety = (self.safety - 0.10).max(0.0);
+        }
+        
+        // Curiosity: Increases with boredom (time), decreases with surprise (learning)
+        // If surprise is high, curiosity is satisfied.
+        self.curiosity = (self.curiosity + 0.005 - surprise * 2.0).clamp(0.0, 1.0);
+        
+        // Energy: Decays with action, recovers slowly
+        self.energy = (self.energy - action_cost + 0.005).clamp(0.0, 1.0);
+    }
+    
+    /// Get the dominant drive (the one with the lowest satisfaction / highest urgency).
+    /// Returns (Drive Name, formatted string)
+    pub fn get_dominant_drive(&self) -> (&'static str, String) {
+        // Invert scales so higher = more urgent
+        let urgency_safety = 1.0 - self.safety;
+        let urgency_curiosity = self.curiosity; // Curiosity IS the drive, so high = urgent
+        let urgency_energy = 1.0 - self.energy; // Low energy = high urgency to rest
+        
+        if urgency_safety > urgency_curiosity && urgency_safety > urgency_energy {
+            ("safety", format!("FEAR (Safety: {:.2})", self.safety))
+        } else if urgency_energy > urgency_curiosity {
+            ("rest", format!("TIRED (Energy: {:.2})", self.energy))
+        } else {
+            ("novelty", format!("BORED (Curiosity: {:.2})", self.curiosity))
+        }
+    }
+}
+
+
 
 /// Semantic concept for thought interpretation.
 #[derive(Clone, Debug)]
@@ -156,6 +216,13 @@ pub struct HarmonicBdh {
     memory_timestamps: Vec<(f32, usize, u64)>,
     
     pub config: BiologicalConfig,
+
+    // === Embodiment / Grounding ===
+    pub last_action: Option<usize>,
+    pub last_reward: f32,
+    
+    // === Phase 2: Motivational Core ===
+    pub drives: HomeostaticDrives,
 }
 
 impl HarmonicBdh {
@@ -218,8 +285,78 @@ impl HarmonicBdh {
             global_time: 0.0,
             time_encoding,
             memory_timestamps: Vec::new(),
+
             config,
+            last_action: None,
+            last_reward: 0.0,
+            drives: HomeostaticDrives::default(),
         }
+    }
+
+    /// (Phase 1) Embodied Forward Pass
+    /// Clamps input sensors, runs brain, extracts motor action, modulates plasticity with valence.
+    pub fn forward_embodied(&mut self, env_input: &[f32], valence: f32) -> usize {
+        // 1. Clamp Input: Map environment observation to first N neurons of Layer 0
+        let mut input_signal = Array1::zeros(self.n);
+        for (i, &val) in env_input.iter().enumerate().take(self.n) {
+            // Scale input to neural range roughly -1.0 to 1.0 (assuming env is normalized-ish)
+            input_signal[i] = val * 2.0; 
+        }
+
+        // 2. Modulate Plasticity based on Valence (Simple Reinforcement)
+        // High valence (reward) = Stronger Hebbian imprinting of the *previous* state transition
+        // Low valence (pain) = Weaker imprinting (or anti-Hebbian, but let's stick to strength for now)
+        // Note: In a real Hebbian system, "reward" is often a neuromodulator like Dopamine.
+        // We simulate this by temporarily boosting learning rate or imprint strength.
+        // For now, let's just record it.
+        self.last_reward = valence;
+        
+        // 3. Update Drives (Phase 2)
+        // Parse CartPole observation (assuming env_input structure)
+        // [x, x_dot, theta, theta_dot]
+        let theta = env_input.get(2).unwrap_or(&0.0);
+        let is_safe = theta.abs() < 0.1; // Safe if angle < 0.1 rad (~5.7 deg)
+        let action_cost = 0.01; // Taking action costs energy
+        let estimated_surprise = 0.01; // Placeholder until Phase 4 (Prediction)
+        
+        self.drives.update(is_safe, estimated_surprise, action_cost);
+        
+        // 4. Run Forward Pass
+        // Note: We use the input_signal as the "sensory drive"
+        let (output_signal, _, _) = self.forward(&input_signal);
+        
+        // 5. Extract Motor Action: Use last M neurons of Layer 0 (or output of last layer?)
+        // Let's use the OUTPUT of Layer 0 for motor control to keep the loop tight for now.
+        // Or better: Use the global output (stream of consciousness) but mapped to actions.
+        // Let's use the LAST layer's output (Semantic Thought) mapped to actions.
+        
+        // Simple strategy: Split output neurons into 'action_dim' bins and pick max energy.
+        let action_dim = 2; // For CartPole
+        let mut action_energies = vec![0.0; action_dim];
+        
+        // Use the middle chunk of neurons for motor cortex
+        let motor_cortex_start = self.n / 2;
+        let motor_cortex_end = self.n;
+        let neurons_per_action = (motor_cortex_end - motor_cortex_start) / action_dim;
+        
+        for a in 0..action_dim {
+            let start = motor_cortex_start + a * neurons_per_action;
+            let end = start + neurons_per_action;
+            let sum: f32 = output_signal.slice(s![start..end]).iter().map(|x| x.abs()).sum();
+            action_energies[a] = sum;
+        }
+        
+        // Epsilon-greedy exploration (implicit in the noise, but let's be explicit if needed)
+        // For now, argmax
+        let selected_action = action_energies
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+            
+        self.last_action = Some(selected_action);
+        selected_action
     }
     
     /// Create a predefined concept space for semantic interpretation.
@@ -281,6 +418,30 @@ impl HarmonicBdh {
         };
         
         (noise, endogenous)
+    }
+    
+    /// (Phase 2) Drive-Biased Noise Injection
+    /// Injects noise specifically into neurons associated with the dominant drive's concept.
+    fn inject_drive_biased_noise(&self, layer: usize) -> Array1<f32> {
+        let (target_concept_name, _) = self.drives.get_dominant_drive();
+        
+        // Find the concept vector
+        let target_concept = self.concepts.iter()
+            .find(|c| c.name == target_concept_name);
+            
+        if let Some(concept) = target_concept {
+            let mut rng = rand::thread_rng();
+            // Scale noise by urgency
+            let urgency = match target_concept_name {
+                "safety" => (1.0 - self.drives.safety) * 0.2, // Panic = high noise
+                "rest" => (1.0 - self.drives.energy) * 0.05,  // Tired = low noise
+                _ => self.drives.curiosity * 0.1,             // Bored = moderate noise
+            };
+            
+            concept.vector.mapv(|x| x * urgency * rng.gen_range(0.5..1.5))
+        } else {
+            Array1::zeros(self.n)
+        }
     }
     
     /// Van der Pol style self-excitation: creates limit cycle behavior.
@@ -700,8 +861,11 @@ impl HarmonicBdh {
         for layer in 0..self.num_layers {
             // (A) SPONTANEOUS ACTIVITY: noise + endogenous drive + self-excitation
             let (noise, endogenous) = self.inject_spontaneous_activity(layer);
+            // Phase 2: Add Drive-Biased Noise
+            let drive_noise = self.inject_drive_biased_noise(layer);
+            
             let self_excite = self.compute_self_excitation(layer);
-            signal = &signal + &noise + &endogenous;
+            signal = &signal + &noise + &endogenous + &drive_noise;
             
             // (B) CROSS-FREQUENCY COUPLING
             let (modulation, coherence) = self.compute_cross_frequency_modulation(layer);

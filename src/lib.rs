@@ -1,3 +1,6 @@
+#![allow(unused)]
+pub mod environment;
+
 use ndarray::{prelude::*, Axis};
 use ndarray_rand::{rand_distr::Normal, RandomExt};
 use rand::{thread_rng, Rng};
@@ -206,16 +209,11 @@ impl ChronosBdh {
         // Range: ~0.0 to heartbeat_strength
         let heartbeat = (self.global_time * self.heartbeat_freq).sin().abs() * self.heartbeat_strength;
 
-        // 2. Probabilistic Recall Trigger (Chaos/Random Cue)
-        // Base chance: 0.5% - 3% per step
-        // If energy is low (< 0.25), boost the chance significantly to prevent getting stuck
-        let base_recall_prob = 0.02f64; // 2%
-        let low_energy_bias = if self.energy_history < 0.25 { 0.05f64 } else { 0.0f64 };
-        let recall_prob = base_recall_prob + low_energy_bias;
+
 
         let mut current_input = input.clone();
         
-        let mut current_input = input.clone();
+
         
         // 2. Heartbeat-Modulated Noise (Systole/Diastole)
         // Peak (Systole) -> High Noise (Exploration)
