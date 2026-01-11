@@ -3,9 +3,10 @@
 //! Provides:
 //! - Simple SGD optimizer
 //! - Training objectives (pattern diversity, reconstruction, prediction)
+//! - Concept coherence loss for narrative-like transitions
 //! - Training loop with logging
 
-use crate::harmonic::{HarmonicBdh, BiologicalConfig};
+use crate::harmonic::HarmonicBdh;
 use ndarray::{Array1, Array2, Axis};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -25,6 +26,10 @@ pub struct TrainingConfig {
     pub diversity_weight: f32,
     pub reconstruction_weight: f32,
     pub energy_reg_weight: f32,
+    /// Concept coherence weight (encourages smooth concept transitions)
+    pub concept_coherence_weight: f32,
+    /// Sparsity weight (encourages selective activation)
+    pub sparsity_weight: f32,
 }
 
 impl Default for TrainingConfig {
@@ -40,6 +45,8 @@ impl Default for TrainingConfig {
             diversity_weight: 1.0,
             reconstruction_weight: 0.5,
             energy_reg_weight: 0.1,
+            concept_coherence_weight: 0.3,
+            sparsity_weight: 0.2,
         }
     }
 }
@@ -88,6 +95,8 @@ pub struct TrainingMetrics {
     pub diversity_loss: f32,
     pub reconstruction_loss: f32,
     pub energy_loss: f32,
+    pub concept_coherence_loss: f32,
+    pub sparsity_loss: f32,
     pub avg_energy: f32,
     pub avg_sparsity: f32,
     pub attractor_stability: f32,
@@ -146,6 +155,70 @@ pub fn energy_regularization(energies: &[f32], target_energy: f32) -> f32 {
     let total_energy: f32 = energies.iter().sum();
     let deviation = (total_energy - target_energy).abs();
     deviation * deviation
+}
+
+/// Concept coherence loss: encourage smooth, narrative-like concept transitions.
+/// Penalizes abrupt changes in concept space between consecutive outputs.
+pub fn concept_coherence_loss(outputs: &[Array1<f32>], model: &HarmonicBdh) -> f32 {
+    if outputs.len() < 2 {
+        return 0.0;
+    }
+    
+    let mut total_incoherence = 0.0f32;
+    let mut count = 0;
+    
+    // Get concept projections for each output
+    let concepts: Vec<Vec<(&str, f32)>> = outputs.iter()
+        .map(|o| model.get_top_concepts(o, 3))
+        .collect();
+    
+    for i in 1..concepts.len() {
+        let prev = &concepts[i - 1];
+        let curr = &concepts[i];
+        
+        // Measure concept transition smoothness
+        // Penalize if top concepts change completely between steps
+        let mut shared_score = 0.0f32;
+        for (name, score) in prev.iter() {
+            for (name2, score2) in curr.iter() {
+                if name == name2 {
+                    // Reward overlapping concepts, weighted by strength
+                    shared_score += score * score2;
+                }
+            }
+        }
+        
+        // Incoherence = 1 - shared_score (higher when concepts change abruptly)
+        total_incoherence += 1.0 - shared_score.min(1.0);
+        count += 1;
+    }
+    
+    if count > 0 {
+        total_incoherence / count as f32
+    } else {
+        0.0
+    }
+}
+
+/// Sparsity loss: encourage selective activation (not too many neurons active).
+pub fn sparsity_loss(outputs: &[Array1<f32>], target_sparsity: f32) -> f32 {
+    if outputs.is_empty() {
+        return 0.0;
+    }
+    
+    let mut total_deviation = 0.0f32;
+    
+    for output in outputs {
+        let active_ratio = output.iter()
+            .filter(|&&v| v.abs() > 0.01)
+            .count() as f32 / output.len() as f32;
+        
+        // Penalize deviation from target sparsity
+        let deviation = (active_ratio - (1.0 - target_sparsity)).abs();
+        total_deviation += deviation * deviation;
+    }
+    
+    total_deviation / outputs.len() as f32
 }
 
 /// Compute gradients via finite differences (simple but works for small models).
@@ -228,19 +301,25 @@ impl Trainer {
                 // Compute losses
                 let div_loss = diversity_loss(&batch_outputs);
                 let recon_loss = reconstruction_loss(&batch_inputs, &batch_outputs);
-                let energy_loss = energy_regularization(&batch_energies, 0.3);
+                let energy_loss_val = energy_regularization(&batch_energies, 0.3);
+                let coherence_loss = concept_coherence_loss(&batch_outputs, model);
+                let sparse_loss = sparsity_loss(&batch_outputs, 0.7);  // Target 70% sparsity
                 
                 let total_loss = self.config.diversity_weight * div_loss
                     + self.config.reconstruction_weight * recon_loss
-                    + self.config.energy_reg_weight * energy_loss;
+                    + self.config.energy_reg_weight * energy_loss_val
+                    + self.config.concept_coherence_weight * coherence_loss
+                    + self.config.sparsity_weight * sparse_loss;
                 
                 // Accumulate metrics
                 epoch_metrics.diversity_loss += div_loss;
                 epoch_metrics.reconstruction_loss += recon_loss;
-                epoch_metrics.energy_loss += energy_loss;
+                epoch_metrics.energy_loss += energy_loss_val;
+                epoch_metrics.concept_coherence_loss += coherence_loss;
+                epoch_metrics.sparsity_loss += sparse_loss;
                 epoch_metrics.total_loss += total_loss;
                 
-                // Compute sparsity
+                // Compute sparsity (for display)
                 let sparsity: f32 = batch_outputs.iter()
                     .map(|o| o.iter().filter(|&&v| v.abs() < 0.01).count() as f32 / o.len() as f32)
                     .sum::<f32>() / batch_outputs.len() as f32;
@@ -262,6 +341,8 @@ impl Trainer {
                 epoch_metrics.diversity_loss /= batch_count as f32;
                 epoch_metrics.reconstruction_loss /= batch_count as f32;
                 epoch_metrics.energy_loss /= batch_count as f32;
+                epoch_metrics.concept_coherence_loss /= batch_count as f32;
+                epoch_metrics.sparsity_loss /= batch_count as f32;
                 epoch_metrics.total_loss /= batch_count as f32;
                 epoch_metrics.avg_sparsity /= batch_count as f32;
                 epoch_metrics.avg_energy /= batch_count as f32;
@@ -270,12 +351,12 @@ impl Trainer {
             // Log progress
             if epoch % self.config.log_every == 0 || epoch == self.config.epochs - 1 {
                 println!(
-                    "Epoch {:4} │ Loss: {:.4} │ Div: {:.4} │ Recon: {:.4} │ Energy: {:.4} │ Sparsity: {:.1}%",
+                    "Epoch {:4} │ Loss: {:.4} │ Div: {:.3} │ Recon: {:.3} │ Coher: {:.3} │ Spars: {:.1}%",
                     epoch,
                     epoch_metrics.total_loss,
                     epoch_metrics.diversity_loss,
                     epoch_metrics.reconstruction_loss,
-                    epoch_metrics.avg_energy,
+                    epoch_metrics.concept_coherence_loss,
                     epoch_metrics.avg_sparsity * 100.0
                 );
             }
@@ -288,14 +369,17 @@ impl Trainer {
     
     /// Adapt model config based on loss (simple heuristic).
     fn adapt_config(&self, model: &mut HarmonicBdh, loss: f32) {
-        // If loss is high, increase exploration (noise)
-        // If loss is low, reduce exploration
+        // Gently adjust noise based on diversity loss
+        // We want to maintain spontaneous activity, so don't reduce noise too aggressively
         let current_noise = model.config.noise_amplitude;
+        let min_noise = 0.04;  // Keep minimum noise for spontaneous activity
         
-        if loss > 0.5 {
-            model.config.noise_amplitude = (current_noise * 1.01).min(0.1);
-        } else if loss < 0.1 {
-            model.config.noise_amplitude = (current_noise * 0.99).max(0.001);
+        if loss > 0.6 {
+            // High loss: increase exploration
+            model.config.noise_amplitude = (current_noise * 1.02).min(0.15);
+        } else if loss < 0.2 && current_noise > min_noise {
+            // Only reduce if we're above minimum threshold
+            model.config.noise_amplitude = (current_noise * 0.995).max(min_noise);
         }
     }
     
@@ -336,6 +420,7 @@ impl Trainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BiologicalConfig;
     
     #[test]
     fn test_diversity_loss() {

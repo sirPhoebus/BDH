@@ -91,14 +91,8 @@ fn main() -> std::io::Result<()> {
     // Create output directory
     std::fs::create_dir_all(&args.output_dir)?;
 
-    // Initialize model
-    let bio_config = BiologicalConfig {
-        noise_amplitude: 0.02,
-        self_excitation: 0.015,
-        endogenous_drive: 0.01,
-        cross_freq_coupling: 0.3,
-        ..Default::default()
-    };
+    // Initialize model with SHORT_BURST config for active daydreaming
+    let bio_config = BiologicalConfig::default();  // Uses SHORT_BURST defaults
 
     let mut model = HarmonicBdh::with_config(
         args.neurons,
@@ -198,19 +192,66 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // Test the trained model
-    println!("\n━━━ MODEL TEST ━━━");
-    let daydream = model.daydream(10);
-    println!("Daydream after training:");
+    // Test the trained model with extended daydream
+    println!("\n━━━ POST-TRAINING DAYDREAM (100 steps) ━━━");
+    let daydream = model.daydream(100);
+    
+    // Analyze state transitions
+    use std::collections::HashMap;
+    let mut state_counts: HashMap<String, usize> = HashMap::new();
+    let mut transitions = 0;
+    let mut last_state = &daydream[0].thought_state;
+    let mut concept_chains: Vec<Vec<String>> = Vec::new();
+    let mut current_chain: Vec<String> = Vec::new();
+    
     for step in &daydream {
-        if step.step % 3 == 0 {
-            let concepts: String = step.top_concepts.iter()
-                .take(2)
-                .map(|(name, score)| format!("{}({:.2})", name, score))
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("  Step {:2}: {} │ {}", step.step, step.thought_state.as_str(), concepts);
+        let state_name = step.thought_state.as_str().to_string();
+        *state_counts.entry(state_name.clone()).or_insert(0) += 1;
+        
+        if &step.thought_state != last_state {
+            transitions += 1;
+            if !current_chain.is_empty() {
+                concept_chains.push(current_chain.clone());
+                current_chain.clear();
+            }
+            last_state = &step.thought_state;
         }
+        
+        // Track concept sequence
+        if let Some((name, _)) = step.top_concepts.first() {
+            if current_chain.last().map(|s| s.as_str()) != Some(*name) {
+                current_chain.push(name.to_string());
+            }
+        }
+    }
+    if !current_chain.is_empty() {
+        concept_chains.push(current_chain);
+    }
+    
+    println!("\nState Distribution:");
+    let mut states: Vec<_> = state_counts.iter().collect();
+    states.sort_by(|a, b| b.1.cmp(a.1));
+    for (state, count) in states {
+        let pct = (*count as f32 / daydream.len() as f32) * 100.0;
+        println!("  {:30} {:3}% ({})", state, pct as i32, count);
+    }
+    
+    println!("\nTransitions: {} in 100 steps ({} per 100)", transitions, transitions);
+    
+    println!("\nSample Concept Chains (showing first 5):");
+    for (i, chain) in concept_chains.iter().take(5).enumerate() {
+        let chain_str = chain.iter().take(6).cloned().collect::<Vec<_>>().join(" → ");
+        println!("  Chain {}: {}", i + 1, chain_str);
+    }
+    
+    println!("\nSample Daydream Steps:");
+    for step in daydream.iter().step_by(10) {
+        let concepts: String = step.top_concepts.iter()
+            .take(2)
+            .map(|(name, score)| format!("{}({:.2})", name, score))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  Step {:3}: {:32} │ {}", step.step, step.thought_state.as_str(), concepts);
     }
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
