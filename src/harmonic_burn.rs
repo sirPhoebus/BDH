@@ -98,31 +98,35 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         self.input_gain = gain;
     }
 
-    /// Modulate brain parameters based on body signals.
-    /// Tight integration of Embodiment.
-    pub fn modulate_from_signals(&mut self, energy: f32, valence: f32) {
-        // 1. Energy -> Theta Frequency & Damping
-        // Low energy (< 0.4) -> Slower waves, higher damping (Conservation/Rest)
-        if energy < 0.4 {
-             // We can't easily multiply frequencies here persistently without drift unless we store base freq.
-             // For now, let's just Modulate Damping.
-             self.set_damping(0.98); // High damping
-        } else {
-             self.set_damping(0.95); // Normal damping
-        }
+    /// Modulate brain parameters based on chemical state.
+    /// DA (Dopamine) -> Search/Resonance (Self-Excitation)
+    /// NE (Norepinephrine) -> Gain/Noise (Sensitivity)
+    /// ACh (Acetylcholine) -> Input Gain (Attention to external)
+    pub fn modulate_neurochem(&mut self, da: f32, ne: f32, ach: f32) {
         
-        // 2. Pain (Valence < -0.3) -> Noise (Thrashing/Avoidance)
-        if valence < -0.3 {
-            self.noise_scale = 0.08 + (valence.abs() * 0.1);
+        // ACh: Cholinergic modulation controls "Signal to Noise".
+        // High ACh = High Input Gain (Focused on world).
+        // Low ACh = Low Input Gain (Focused on internal/dream).
+        self.set_input_gain(ach.max(0.1));
+        
+        // NE: Noradrenergic modulation controls global excitability/noise.
+        // High NE = High Noise (Search/Panic/Alert).
+        // Low NE = Low Noise (Calm).
+        self.noise_scale = 0.005 + (ne * 0.05);
+        
+        // DA: Dopaminergic modulation controls "Gating" / Resonance.
+        // High DA = High Self-Excitation (Lock onto reward/thought).
+        // Low DA = Low Self-Excitation (Apathy/Drift).
+        self.self_excitation = da * 0.1; // Scale to appropriate physics range
+        
+        // Damping: Inverse of Energy/ACh?
+        // If High ACh (Awake), standard damping.
+        // If Low ACh (Asleep), less damping (oscillations persist)? Or more?
+        // Usually sleep = synchrony.
+        if ach < 0.2 {
+             self.set_damping(0.98); // Sleep damping
         } else {
-            self.noise_scale = 0.01;
-        }
-
-        // 3. Pleasure (Valence > 0.4) -> Self-Excitation (Resonance/Sustain)
-        if valence > 0.4 {
-            self.self_excitation = 0.05; // Lock in this state
-        } else {
-            self.self_excitation = 0.0;
+             self.set_damping(0.95); // Wake damping
         }
     }
 

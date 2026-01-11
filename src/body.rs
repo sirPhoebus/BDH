@@ -22,6 +22,26 @@ pub struct BodyState {
     /// Positive = Pleasure/Reward. Negative = Pain/Punishment.
     /// Decays towards 0.0 over time.
     pub pleasure_pain: f32,
+
+    /// Chemical state (DA, NE, ACh)
+    pub chemicals: Neuromodulators,
+}
+
+#[derive(Clone, Debug)]
+pub struct Neuromodulators {
+    pub dopamine: f32,       // Reward / Plasticity
+    pub norepinephrine: f32, // Arousal / Gain
+    pub acetylcholine: f32,  // Attention / Input-Internal Balance
+}
+
+impl Neuromodulators {
+    pub fn new() -> Self {
+        Self {
+            dopamine: 0.5,
+            norepinephrine: 0.5,
+            acetylcholine: 0.5,
+        }
+    }
 }
 
 impl BodyState {
@@ -31,6 +51,7 @@ impl BodyState {
             integrity: 1.0,
             pleasure_pain: 0.0,
             arousal: 0.5,
+            chemicals: Neuromodulators::new(),
         }
     }
 
@@ -57,7 +78,25 @@ impl BodyState {
         let target_arousal = (self.energy * 0.7) + (stress * 0.3);
         self.arousal = 0.9 * self.arousal + 0.1 * target_arousal;
 
-        // 4. Integrity impact
+        // 4. Update Neuromodulators (The Chemical Substrate)
+        
+        // Dopamine (DA): Reward Prediction Error proxy. 
+        // If Valence > Expected (0), DA spikes.
+        // DA decays naturally.
+        let reward_signal = self.pleasure_pain.max(0.0);
+        self.chemicals.dopamine = 0.9 * self.chemicals.dopamine + 0.1 * reward_signal;
+        
+        // Norepinephrine (NE): Acute Arousal / Shock.
+        // Responds to stress (pain) or high intensity.
+        let shock = stress + action_intensity;
+        self.chemicals.norepinephrine = 0.8 * self.chemicals.norepinephrine + 0.2 * shock;
+        
+        // Acetylcholine (ACh): Focus / Wakefulness.
+        // High Energy = High ACh (External focus).
+        // Low Energy = Low ACh (Internal focus / Dream).
+        self.chemicals.acetylcholine = self.energy;
+
+        // 5. Integrity impact
         if env_valence < -0.5 {
             // Strong pain causes damage
             let damage = env_valence.abs() * 0.05;

@@ -59,11 +59,14 @@ pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> 
     chunks
 }
 
+use tokenizers::Tokenizer;
+use tokenizers::models::bpe::{BpeTrainer, BpeBuilder};
+use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
 /// Embedder: tokenizes text and projects to neuron-dimensional space.
-/// Uses a simple word-based vocabulary instead of BPE for simplicity.
+/// Uses HuggingFace Tokenizers BPE for scalable vocabulary.
 pub struct Embedder {
-    vocab: std::collections::HashMap<String, u32>,
-    reverse_vocab: std::collections::HashMap<u32, String>,
+    tokenizer: Tokenizer,
     projection: Array2<f32>,   // vocab_size x n
     pub vocab_size: usize,
     pub n: usize,
@@ -72,78 +75,82 @@ pub struct Embedder {
 impl Embedder {
     /// Create a new embedder with a pre-trained tokenizer file.
     pub fn from_pretrained(tokenizer_path: &str, n: usize) -> io::Result<Self> {
-        use std::collections::HashMap;
-        
-        // Load vocabulary from JSON file
-        let content = fs::read_to_string(tokenizer_path)?;
-        let vocab: HashMap<String, u32> = serde_json::from_str(&content)
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        
-        let reverse_vocab: HashMap<u32, String> = vocab.iter()
-            .map(|(k, v)| (*v, k.clone()))
-            .collect();
-        
-        let vocab_size = vocab.len();
+            
+        let vocab_size = tokenizer.get_vocab_size(true);
         let projection = Self::init_projection(vocab_size, n);
         
         Ok(Self {
-            vocab,
-            reverse_vocab,
+            tokenizer,
             projection,
             vocab_size,
             n,
         })
     }
     
-    /// Create a new embedder and train vocabulary on corpus.
+    /// Create a new embedder and train BPE on corpus.
     pub fn train_on_corpus(texts: &[String], vocab_size: usize, n: usize) -> io::Result<Self> {
-        use std::collections::HashMap;
+        println!("Training BPE Tokenizer on {} texts...", texts.len());
         
-        println!("Building vocabulary from {} texts...", texts.len());
+        let mut builder = BpeBuilder::new();
+        let bpe = builder.build().unwrap(); 
+        let mut tokenizer = Tokenizer::new(bpe); // This wraps BPE in ModelWrapper
         
-        // Build word frequency map
-        let mut word_freq: HashMap<String, usize> = HashMap::new();
+        tokenizer.with_pre_tokenizer(Whitespace::default());
         
-        for text in texts {
-            for word in text.split_whitespace() {
-                let clean_word = word.to_lowercase()
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect::<String>();
-                if !clean_word.is_empty() {
-                    *word_freq.entry(clean_word).or_insert(0) += 1;
-                }
+        let mut trainer = BpeTrainer::builder()
+            .vocab_size(vocab_size)
+            .min_frequency(2)
+            .special_tokens(vec![
+                tokenizers::AddedToken::from("<pad>", true),
+                tokenizers::AddedToken::from("<unk>", true),
+                tokenizers::AddedToken::from("<bos>", true),
+                tokenizers::AddedToken::from("<eos>", true),
+            ])
+            .build();
+            
+        // Write corpus to temp file for training
+        let temp_corpus_path = "temp_corpus.txt";
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(temp_corpus_path)?;
+            for text in texts {
+                writeln!(file, "{}", text)?;
             }
         }
         
-        // Sort by frequency and take top vocab_size
-        let mut words: Vec<_> = word_freq.into_iter().collect();
-        words.sort_by(|a, b| b.1.cmp(&a.1));
-        words.truncate(vocab_size - 4); // Reserve for special tokens
+        // HACK: Use TokenizerImpl with explicit Wrappers to match BPE model with BpeTrainer
+        use tokenizers::tokenizer::TokenizerImpl;
+        use tokenizers::{NormalizerWrapper, PreTokenizerWrapper, PostProcessorWrapper, DecoderWrapper};
         
-        // Create vocabulary with special tokens
-        let mut vocab: HashMap<String, u32> = HashMap::new();
-        vocab.insert("<pad>".to_string(), 0);
-        vocab.insert("<unk>".to_string(), 1);
-        vocab.insert("<bos>".to_string(), 2);
-        vocab.insert("<eos>".to_string(), 3);
+        // Explicitly typed TokenizerImpl using wrappers for components but BPE for model
+        let mut local_tokenizer: TokenizerImpl<
+            tokenizers::models::bpe::BPE,
+            NormalizerWrapper,
+            PreTokenizerWrapper,
+            PostProcessorWrapper,
+            DecoderWrapper
+        > = TokenizerImpl::new(tokenizers::models::bpe::BPE::default());
         
-        for (i, (word, _)) in words.iter().enumerate() {
-            vocab.insert(word.clone(), (i + 4) as u32);
-        }
+        local_tokenizer.with_pre_tokenizer(PreTokenizerWrapper::Whitespace(Whitespace::default()));
+
+        local_tokenizer.train_from_files(&mut trainer, vec![temp_corpus_path.to_string()])
+             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+             
+        // Clean up
+        let _ = fs::remove_file(temp_corpus_path);
         
-        let actual_vocab_size = vocab.len();
-        println!("Built vocabulary with {} tokens", actual_vocab_size);
-        
-        let reverse_vocab: HashMap<u32, String> = vocab.iter()
-            .map(|(k, v)| (*v, k.clone()))
-            .collect();
+        // Now wrap the trained model
+        let tokenizer = Tokenizer::new(local_tokenizer.get_model().clone());
+            
+        let actual_vocab_size = tokenizer.get_vocab_size(true);
+        println!("Trained BPE with {} tokens", actual_vocab_size);
         
         let projection = Self::init_projection(actual_vocab_size, n);
         
         Ok(Self {
-            vocab,
-            reverse_vocab,
+            tokenizer,
             projection,
             vocab_size: actual_vocab_size,
             n,
@@ -158,33 +165,24 @@ impl Embedder {
         Array2::random_using((vocab_size, n), dist, &mut rng)
     }
     
-    /// Save vocabulary to file.
+    /// Save tokenizer to file (JSON).
     pub fn save_tokenizer(&self, path: &str) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.vocab)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        fs::write(path, json)
+        self.tokenizer.save(path, true)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
     
     /// Tokenize text and return token IDs.
     pub fn tokenize(&self, text: &str) -> Vec<u32> {
-        text.split_whitespace()
-            .map(|word| {
-                let clean_word = word.to_lowercase()
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect::<String>();
-                *self.vocab.get(&clean_word).unwrap_or(&1) // 1 = <unk>
-            })
-            .collect()
+        if let Ok(encoding) = self.tokenizer.encode(text, false) {
+            encoding.get_ids().to_vec()
+        } else {
+            vec![]
+        }
     }
     
     /// Decode token IDs back to text.
     pub fn decode(&self, ids: &[u32]) -> String {
-        ids.iter()
-            .filter_map(|id| self.reverse_vocab.get(id))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ")
+        self.tokenizer.decode(ids, false).unwrap_or_else(|_| "".to_string())
     }
     
     /// Embed a single token ID to n-dimensional space.
@@ -198,9 +196,11 @@ impl Embedder {
     }
     
     /// Embed text to sequence of n-dimensional vectors.
-    /// Returns (seq_len, n) array.
     pub fn embed_text(&self, text: &str) -> Array2<f32> {
         let tokens = self.tokenize(text);
+        if tokens.is_empty() {
+             return Array2::zeros((0, self.n));
+        }
         let mut embeddings = Array2::zeros((tokens.len(), self.n));
         
         for (i, &token_id) in tokens.iter().enumerate() {
@@ -211,19 +211,12 @@ impl Embedder {
         embeddings
     }
     
-    /// Embed text with sparse ReLU activation (positive orthant projection).
-    pub fn embed_text_sparse(&self, text: &str, sparsity_bias: f32) -> Array2<f32> {
-        let embeddings = self.embed_text(text);
-        
-        // Apply ReLU with negative bias for sparsity
-        embeddings.mapv(|v| (v - sparsity_bias).max(0.0))
-    }
-    
     /// Decode finding the nearest token to the given vector (Cosine Similarity).
-    /// Returns (Token, Similarity).
     pub fn decode_nearest(&self, query_vec: &Array1<f32>) -> (String, f32) {
         let mut best_sim = -1.0;
-        let mut best_token = "<unk>".to_string();
+        // BPE vocab is usually smaller than hash space, iterating 5000 is fast enough.
+        // We iterate 0..vocab_size
+        let mut best_id = 0;
         
         // Normalize query
         let q_norm = query_vec.dot(query_vec).sqrt();
@@ -231,26 +224,22 @@ impl Embedder {
             return ("Void".to_string(), 0.0);
         }
         
-        // Brute-force search (slow but effective for 5000 tokens)
-        for (token, &id) in &self.vocab {
-            let id = id as usize;
+        // This iteration should be optimized for scale, but for 5k-10k it's fine.
+        for id in 0..self.vocab_size {
             if id >= self.projection.nrows() { continue; }
-            
             let emb = self.projection.row(id);
-            // Sim = A . B / (|A|*|B|)
-            // Projection rows are random normal, len approx 1.0 but not exactly.
             let dot = emb.dot(query_vec);
             let emb_norm = emb.dot(&emb).sqrt();
-            
             let sim = dot / (q_norm * emb_norm);
             
             if sim > best_sim {
                 best_sim = sim;
-                best_token = token.clone();
+                best_id = id;
             }
         }
         
-        (best_token, best_sim)
+        let token = self.tokenizer.decode(&[best_id as u32], false).unwrap_or("<err>".to_string());
+        (token, best_sim)
     }
 }
 

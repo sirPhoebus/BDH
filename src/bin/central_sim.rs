@@ -50,9 +50,9 @@ fn main() {
         panic!("No books found! Run get_books first.");
     }
     
-    // Train Embedder
-    println!("   Training Embedder on {} books...", books.len());
-    let embedder = bdh_model::data::Embedder::train_on_corpus(&books, 5000, n_neurons).unwrap();
+    // Train BPE Embedder
+    println!("   Training BPE Embedder on {} books (Scalable)...", books.len());
+    let embedder = bdh_model::data::Embedder::train_on_corpus(&books, 8000, n_neurons).unwrap(); // 8k vocab
     println!("   Embedder ready. Vocab size: {}", embedder.vocab_size);
     
     // Initialize Reader State
@@ -106,34 +106,26 @@ fn main() {
         drives.update(body.energy, novelty);
         let current_drive = drives.get_dominant_drive();
         
-        // --- C. Brain Modulation ---
-        // Sleep/Wake cycle based on energy
-        if body.energy < 0.2 {
-            cortex.modulate_frequencies(0.5); 
+        // --- C. Brain Modulation (Neurochemical) ---
+        // 1. Update Neurotransmitters
+        let da = body.chemicals.dopamine;
+        let ne = body.chemicals.norepinephrine;
+        let ach = body.chemicals.acetylcholine;
+        
+        // 2. Modulate Physics
+        cortex.modulate_neurochem(da, ne, ach);
+        
+        // Sleep frequency modulation (Low ACh)
+        if ach < 0.2 {
+             cortex.modulate_frequencies(0.5);
         } else {
-            cortex.modulate_frequencies(1.0);
+             cortex.modulate_frequencies(1.0);
         }
         
-        // Drive Modulation
+        // Drive Modulation (shifts targets, physics handled by chemicals now)
         let modulation = drives.get_modulation();
-        cortex.set_damping(modulation.damping_target);
-        
-        // --- Body Modulation (Embodiment) ---
-        // Combine Drive Noise Bias with Body Pain
-        let valence = body.pleasure_pain;
-        let pain_noise = if valence < -0.1 { 0.2 * valence.abs() } else { 0.0 };
-        // Base noise is Drive Bias + Pain Effect
-        // If Pleasure (valence > 0.1), we reduce noise further (focus)
-        let pleasure_damping = if valence > 0.1 { 0.5 } else { 1.0 };
-        
-        let pleasure_damping = if valence > 0.1 { 0.5 } else { 1.0 };
-        
-        cortex.set_noise((modulation.noise_bias + pain_noise) * pleasure_damping);
-        
-        // Plasticity Modulation via Arousal
-        // High Arousal = High Gain (Alert, taking in info)
-        // Low Arousal = Low Gain (Sleepy, ignore stats)
-        cortex.set_input_gain(body.arousal.max(0.1));
+        // We override damping from neurochem if drive is strong?
+        // Let's let Neurochem be the final arbiter of physics.
         
         // Calculate Bias Tensor here to be available for both Reading and Dreaming (if needed)
         // 2. Drive Goal Injection (Bias)
@@ -142,12 +134,9 @@ fn main() {
         
         match current_drive.as_deref() {
             Some("HUNGER") => {
-                 // Inject Food Bias
                  bias_input = Some(food_vec.clone());
-                 // println!("   (Hunger -> seeking food)");
             },
             Some("CURIOSITY") => {
-                 // Inject Novelty Bias
                  bias_input = Some(novelty_vec.clone());
             },
             _ => {},
@@ -173,90 +162,116 @@ fn main() {
         let bias_3d = total_bias_vec.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
 
 
-        // --- D. Input Processing (Reading OR Dreaming) ---
-        let input_word: String;
-        let mut prediction = "".to_string();
-        let mut is_dreaming = false;
+        // --- D. Agency / Action Selection (Homeostatic) ---
+        // Determine Action to minimize Homeostatic Error (Maximize Wellbeing)
         
-        // DREAM MODE TRIGGER:
-        // Use Drives: If seeking/playing/resting, we might dream if no external input
-        // For now, keep the simple energy trigger + Drive trigger
-        if body.energy < 0.2 || (current_drive.is_none() && step > 100) {
-             is_dreaming = true;
+        enum Action {
+            Read,
+            Skip,      
+            Reflect,   
+            Dream,     
         }
-        
-        if is_dreaming {
-            // --- DREAMING (Reflection Loop) ---
-            // 1. Interpret current state -> Narrative
-            let cortical_out = cortex.get_cortical_output();
-            let output_arr = Array1::from(cortical_out);
-            
-            // Re-use logic for best concept (duplicated from below, maybe refactor later)
-            // Ideally we interpret what we *just* saw.
-            // For loop closure: We need a narrative to reflect on.
-            // Let's use the PREVIOUS narrative (stored in interpreter history?) 
-            // Or generate a new one now.
-            
-            // Let's decode nearest token for simplicity of "Input Word" display
-            let (next_token, _conf) = embedder.decode_nearest(&output_arr);
-            input_word = next_token.clone();
-            prediction = format!("(Reflecting) {}", input_word);
-            
-            // 2. Reflect: Narrative -> Vector
-            // We construct a narrative string "I notice X"
-            let self_talk = format!("I notice {}", input_word);
-            let feedback_vector = interpreter.reflect(&self_talk, &embedder);
-            
-            // 3. Feed it back
-             let emb_vec = feedback_vector.to_vec();
-             let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
-             let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
-            
-            cortex.step(Some(input_3d));
-            
-            // Dreaming cost
-            body.energy = (body.energy - 0.001).max(0.0);
-            
-        } else {
-            // --- READING ---
-            // 1. Prediction: Before seeing the word, what did we expect?
-            // Decode *previous* step's output (which is current state before new input)
-            let cortical_out = cortex.get_cortical_output();
-            let out_vec = Array1::from(cortical_out);
-            let (predicted_token, _conf) = embedder.decode_nearest(&out_vec);
-            prediction = predicted_token;
 
-            // 2. Read actual word
-            if token_ptr < current_tokens.len() {
-                let token_id = current_tokens[token_ptr];
-                input_word = embedder.decode(&[token_id]);
+        // Homeostatic Policy
+        // 1. Energy Low (Low ACh) -> DREAM (Rest/Consolidate)
+        // 2. High NE (Panic/Boredom) -> SKIP (Escape/Search)
+        // 3. High DA (Flow) -> READ (Sustain)
+        // 4. High Curiosity -> REFLECT (Meta-cognitive check)
+        
+        let action = if body.chemicals.acetylcholine < 0.3 {
+             Action::Dream
+        } else if body.chemicals.norepinephrine > 0.7 {
+             Action::Skip // Panic/Overwhelmed
+        } else if drives.curiosity > 0.7 && step % 40 == 0 {
+             Action::Reflect
+        } else {
+             Action::Read
+        };
+        
+        let mut input_word = "".to_string();
+        let mut prediction = "".to_string();
+        
+        match action {
+             Action::Dream => {
+                // --- DREAMING (Deep Reflection) ---
+                let cortical_out = cortex.get_cortical_output();
+                let output_arr = Array1::from(cortical_out);
+                let (next_token, _conf) = embedder.decode_nearest(&output_arr);
+                input_word = next_token.clone();
+                prediction = format!("(Dreaming) {}", input_word);
                 
-                // Get embedding [Neurons]
-                let emb = embedder.embed_token(token_id); // Array1<f32>
-                let emb_vec = emb.to_vec();
-                
+                // Feedback
+                let self_talk = format!("I dream of {}", input_word);
+                let feedback_vector = interpreter.reflect(&self_talk, &embedder);
+                let emb_vec = feedback_vector.to_vec();
                 let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
-                // Reshape [Neurons] -> [1, 1, Neurons] -> Broadcast
                 let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
+                cortex.step(Some(input_3d));
                 
-                // Add Modulatory Bias (Goal + Echo)
-                let final_input = input_3d.add(bias_3d);
-                
-                cortex.step(Some(final_input));
-                
-                body.energy = (body.energy + 0.01).min(1.0);
-                token_ptr += 1;
-            } else {
-                cortex.step(None);
-                input_word = "<END>".to_string();
-                
-                if drives.hunger > 0.8 {
-                    current_book_idx = (current_book_idx + 1) % books.len();
-                    current_tokens = embedder.tokenize(&books[current_book_idx]);
-                    token_ptr = 0;
-                    println!("--> Opening Book {}...", current_book_idx);
+                body.energy = (body.energy - 0.001).max(0.0);
+             },
+             
+             Action::Reflect => {
+                 // --- REFLECTION (Shallow) ---
+                 // Stop reading, look at last thought, reinforce it.
+                 prediction = "(Reflecting)".to_string();
+                 if !last_narrative.is_empty() {
+                      input_word = "self".to_string();
+                      let echo_vec = interpreter.reflect(&last_narrative, &embedder); // Stronger than echo loop
+                      let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
+                      let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
+                      cortex.step(Some(input_3d));
+                 } else {
+                     cortex.step(None); 
+                 }
+             },
+             
+             Action::Skip => {
+                 // --- SKIPPING ---
+                 // Fast forward to find novelty
+                 input_word = "(Skipping)".to_string();
+                 token_ptr += 10;
+                 // Small energy cost for skipping
+                 body.energy = (body.energy - 0.002).max(0.0);
+                 cortex.step(None); // Brain is "offline" while skipping
+             },
+             
+             Action::Read => {
+                 // --- READING (Standard) ---
+                // 1. Prediction
+                let cortical_out = cortex.get_cortical_output();
+                let out_vec = Array1::from(cortical_out);
+                let (predicted_token, _conf) = embedder.decode_nearest(&out_vec);
+                prediction = predicted_token;
+    
+                // 2. Read actual word
+                if token_ptr < current_tokens.len() {
+                    let token_id = current_tokens[token_ptr];
+                    input_word = embedder.decode(&[token_id]);
+                    
+                    let emb = embedder.embed_token(token_id);
+                    let emb_vec = emb.to_vec();
+                    let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
+                    let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
+                    
+                    // Add Modulatory Bias (Goal + Echo)
+                    let final_input = input_3d.add(bias_3d);
+                    
+                    cortex.step(Some(final_input));
+                    
+                    body.energy = (body.energy + 0.01).min(1.0);
+                    token_ptr += 1;
+                } else {
+                    cortex.step(None);
+                    input_word = "<END>".to_string();
+                    if drives.hunger > 0.8 {
+                        current_book_idx = (current_book_idx + 1) % books.len();
+                        current_tokens = embedder.tokenize(&books[current_book_idx]);
+                        token_ptr = 0;
+                        println!("--> Opening Book {}...", current_book_idx);
+                    }
                 }
-            }
+             }
         }
         
         // --- E. Readout ---
@@ -306,12 +321,26 @@ fn main() {
                  // println!("   [No Learn] Score: {:.2} (Concept: {}), SumE: {:.2}", best_score, best_concept, sum_e);
             }
 
-            // --- EMBODIMENT LOOP ---
-            let env_valence = match best_concept {
-                "Safety" => 0.2, // Pleasure
-                "Danger" => -0.5, // Pain
-                _ => 0.0, // Neutral
+            // --- EMBODIMENT LOOP (Refined) ---
+            // 1. Concept-based Valence (Safety/Danger)
+            let mut env_valence = match best_concept {
+                "Safety" => 0.2, 
+                "Danger" => -0.3,
+                _ => 0.0,
             };
+            
+            // 2. Epistemic Valence (Coherence/Confusion)
+            // High Confidence = Pleasure (Flow). Low Confidence = Anxiety.
+            let epistemic_reward = (confidence - 0.5) * 0.1; 
+            env_valence += epistemic_reward;
+            
+            // 3. Goal Alignment (if Hunger, finding Food = Reward)
+            // (Simplified: If we output "Hunger" drive related words?)
+            // Just use simple "Novelty Reward" for now if Curiosity is high
+            if drives.curiosity > 0.6 && input_word != "<unk>" {
+                 env_valence += 0.05;
+            }
+
             if env_valence != 0.0 {
                 body.update(0.1, env_valence);
             }
