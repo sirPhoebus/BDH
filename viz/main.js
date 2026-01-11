@@ -88,6 +88,7 @@ const achBar = document.getElementById('ach-bar');
 const daVal = document.getElementById('da-val');
 const neVal = document.getElementById('ne-val');
 const achVal = document.getElementById('ach-val');
+const narrativeElem = document.getElementById('narrative');
 
 socket.onopen = () => {
     statusElem.innerText = "CONNECTED";
@@ -272,6 +273,12 @@ function updateVisualization(data) {
 
     statusElem.innerText = `[${data.input_word}] > ${data.prediction}`;
     statusElem.style.color = ne > 0.6 ? "#ff5555" : (da > 0.6 ? "#ffff00" : "#00ff00");
+
+    narrativeElem.innerText = data.inner_voice || "...";
+    if (data.inner_voice.includes("Danger")) narrativeElem.style.color = "#ff8888";
+    else if (data.inner_voice.includes("Safety")) narrativeElem.style.color = "#88ff88";
+    else if (data.inner_voice.includes("Life") || data.inner_voice.includes("Thought")) narrativeElem.style.color = "#88ccff";
+    else narrativeElem.style.color = "#aaa";
 }
 
 // --- ANIMATION LOOP ---

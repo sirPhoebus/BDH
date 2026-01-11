@@ -27,7 +27,8 @@ struct BrainStateUpdate {
     acetylcholine: f32,
     input_word: String,
     prediction: String,
-    memory_event: Option<Vec<f32>>, // [NEW] Broadcast the embedding of a saved memory
+    inner_voice: String,        // [NEW] Narrative thought
+    memory_event: Option<Vec<f32>>,
 }
 
 /// A simple episodic memory of a high-affect event.
@@ -521,6 +522,7 @@ async fn main() {
                     acetylcholine: body.chemicals.acetylcholine,
                     input_word: input_word.clone(),
                     prediction: prediction.clone(),
+                    inner_voice: last_narrative.clone(), // Broadcast narrative
                     memory_event: current_memory_event,
                 };
                 let _ = tx_shared.send(update);
