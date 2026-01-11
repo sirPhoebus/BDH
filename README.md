@@ -75,33 +75,33 @@ Tested 9 configurations for spontaneous activity over 200 steps:
 | Config | Transitions | Bursts | Burst Dur | % Resting |
 |--------|-------------|--------|-----------|-----------|
 | Baseline | 3 | 1 | 12.0 | 94.0% |
-| +Endogenous | 4 | 1 | 15.3 | 89.5% |
-| +Van der Pol | 6 | 1 | 27.5 | 71.9% |
-| Both | 5 | 1 | 32.9 | 70.1% |
-| Aggressive | 15 | 2 | 61.4 | 38.6% |
-| Tuned | 16 | 3 | 53.6 | 37.9% |
-| Bursty | 6 | 2 | 16.5 | 78.3% |
-| Optimal | 13 | 2 | 33.7 | 56.5% |
-| **SHORT_BURST** ★ | **17** | 3 | 56.2 | **18.4%** |
+| +Endogenous | 4 | 1 | 13.1 | 90.0% |
+| +Van der Pol | 3 | 1 | 15.0 | 92.5% |
+| Both | 5 | 1 | 26.7 | 74.8% |
+| Aggressive | 15 | 2 | 61.6 | 34.4% |
+| Tuned | 12 | 2 | 29.6 | 66.2% |
+| Bursty | 7 | 2 | 20.8 | 74.6% |
+| Optimal | 13 | 2 | 42.3 | 49.9% |
+| **SHORT_BURST** ★ | **21** | 4 | 34.5 | **40.6%** |
 
 **SHORT_BURST config** (now default):
-- 8.5 transitions per 100 steps ✓ (target: 4-12)
-- 18% time resting ✓ (target: <50%)
-- Excellent state mix: Active Planning 41%, Contemplative 33%, Transitioning 8%
+- 10.5 transitions per 100 steps ✓ (target: 4-12)
+- 40.6% time resting ✓ (target: <50%)
+- Excellent state mix: Active Planning 25%, Contemplative 20%, Transitioning 15%
 
 ## Configuration
 
 ```rust
 BiologicalConfig {
-    noise_amplitude: 0.060,       // Background noise for restarts
-    self_excitation: 0.018,       // Low Van der Pol μ (don't sustain)
-    endogenous_drive: 0.045,      // Layer 0 heartbeat (higher)
-    cross_freq_coupling: 0.34,    // Theta-gamma binding
-    homeostatic_threshold: 0.22,  // Boredom threshold
-    homeostatic_rate: 0.10,       // Adaptation speed
-    adaptive_noise_rate: 0.50,    // Exploration boost rate (fast)
-    base_damping: 0.93,           // Energy decay
-    boredom_delay: 4,             // Quick boredom onset
+    noise_amplitude: 0.070,       // High noise for quick restarts
+    self_excitation: 0.028,       // Moderate Van der Pol μ
+    endogenous_drive: 0.060,      // Layer 0 heartbeat (high)
+    cross_freq_coupling: 0.36,    // Theta-gamma binding
+    homeostatic_threshold: 0.12,  // Low = triggers boredom early
+    homeostatic_rate: 0.28,       // Very fast adaptation
+    adaptive_noise_rate: 0.80,    // Very high - rapid recovery
+    base_damping: 0.89,           // Higher decay = shorter bursts
+    boredom_delay: 2,             // Boredom kicks in very fast
 }
 ```
 

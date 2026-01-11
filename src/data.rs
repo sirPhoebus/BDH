@@ -226,28 +226,64 @@ pub mod acquisition {
     use std::io::{self, Write};
     use std::path::Path;
     
-    /// List of popular Gutenberg book IDs (science fiction, classics).
+    /// List of popular Gutenberg book IDs (expanded corpus for richer semantics).
+    /// Categories: Adventure, Sci-Fi, Philosophy, Drama, Mystery, Fantasy
     pub const GUTENBERG_IDS: &[u32] = &[
-        84,     // Frankenstein
-        1342,   // Pride and Prejudice
-        11,     // Alice in Wonderland
-        1661,   // Sherlock Holmes
-        2701,   // Moby Dick
-        98,     // Tale of Two Cities
-        1232,   // The Prince
-        174,    // Picture of Dorian Gray
-        2600,   // War and Peace
-        1400,   // Great Expectations
-        4300,   // Ulysses
+        // === ADVENTURE ===
+        120,    // Treasure Island
+        103,    // Around the World in 80 Days
+        164,    // Twenty Thousand Leagues
+        18857,  // The Count of Monte Cristo
+        1184,   // The Count of Monte Cristo (alt)
+        2083,   // The Scarlet Pimpernel
         76,     // Huckleberry Finn
-        1260,   // Jane Eyre
-        345,    // Dracula
-        5200,   // Metamorphosis
+        74,     // Tom Sawyer
+        
+        // === SCI-FI / SPECULATIVE ===
+        84,     // Frankenstein
         35,     // Time Machine
         36,     // War of the Worlds
-        164,    // Twenty Thousand Leagues
+        62,     // A Princess of Mars
+        159,    // The Island of Dr. Moreau
+        5200,   // Metamorphosis
+        
+        // === MYSTERY / HORROR ===
+        1661,   // Sherlock Holmes
+        2852,   // Hound of the Baskervilles
+        244,    // A Study in Scarlet
+        345,    // Dracula
         43,     // Jekyll and Hyde
+        
+        // === CLASSICS / DRAMA ===
+        1342,   // Pride and Prejudice
+        158,    // Emma
+        105,    // Persuasion
+        1260,   // Jane Eyre
+        768,    // Wuthering Heights
+        98,     // Tale of Two Cities
+        1400,   // Great Expectations
+        174,    // Picture of Dorian Gray
+        11,     // Alice in Wonderland
+        12,     // Through the Looking Glass
+        
+        // === PHILOSOPHY / IDEAS ===
+        1232,   // The Prince (Machiavelli)
+        1497,   // Republic (Plato)
+        3600,   // Thus Spake Zarathustra
+        4280,   // Meditations (Marcus Aurelius)
+        5827,   // The Problems of Philosophy
+        
+        // === MYTHOLOGY / EPIC ===
+        6130,   // The Iliad
+        1727,   // The Odyssey
+        22381,  // Metamorphoses (Ovid)
+        
+        // === ADDITIONAL CLASSICS ===
+        2701,   // Moby Dick
+        2600,   // War and Peace
+        4300,   // Ulysses
         1952,   // The Yellow Wallpaper
+        514,    // Little Women
     ];
     
     /// Download a single Gutenberg book.

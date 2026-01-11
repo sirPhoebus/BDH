@@ -43,7 +43,7 @@ struct Args {
     layers: usize,
 
     /// Vocabulary size for tokenizer
-    #[arg(long, default_value_t = 4000)]
+    #[arg(long, default_value_t = 8000)]
     vocab_size: usize,
 
     /// Sequence length for training
@@ -193,8 +193,8 @@ fn main() -> std::io::Result<()> {
     }
 
     // Test the trained model with extended daydream
-    println!("\n━━━ POST-TRAINING DAYDREAM (100 steps) ━━━");
-    let daydream = model.daydream(100);
+    println!("\n━━━ POST-TRAINING DAYDREAM (500 steps) ━━━");
+    let daydream = model.daydream(500);
     
     // Analyze state transitions
     use std::collections::HashMap;
@@ -236,13 +236,37 @@ fn main() -> std::io::Result<()> {
         println!("  {:30} {:3}% ({})", state, pct as i32, count);
     }
     
-    println!("\nTransitions: {} in 100 steps ({} per 100)", transitions, transitions);
+    let per_100 = (transitions as f32 / daydream.len() as f32) * 100.0;
+    println!("\nTransitions: {} in {} steps ({:.1} per 100)", transitions, daydream.len(), per_100);
     
-    println!("\nSample Concept Chains (showing first 5):");
-    for (i, chain) in concept_chains.iter().take(5).enumerate() {
-        let chain_str = chain.iter().take(6).cloned().collect::<Vec<_>>().join(" → ");
-        println!("  Chain {}: {}", i + 1, chain_str);
+    println!("\nConcept Chains (showing longest 8):");
+    let mut sorted_chains = concept_chains.clone();
+    sorted_chains.sort_by(|a, b| b.len().cmp(&a.len()));
+    for (i, chain) in sorted_chains.iter().take(8).enumerate() {
+        let chain_str = chain.iter().take(12).cloned().collect::<Vec<_>>().join(" → ");
+        let suffix = if chain.len() > 12 { "..." } else { "" };
+        println!("  Chain {} ({} steps): {}{}", i + 1, chain.len(), chain_str, suffix);
     }
+    
+    // Look for narrative arc patterns
+    println!("\nNarrative Arc Analysis:");
+    let setup_concepts = ["safety", "rest", "memory", "planning"];
+    let conflict_concepts = ["danger", "curiosity", "exploration", "novelty"];
+    let resolution_concepts = ["pattern", "prediction", "safety", "rest"];
+    
+    let mut arc_count = 0;
+    for chain in &sorted_chains {
+        if chain.len() >= 3 {
+            let has_setup = chain.iter().take(chain.len()/3).any(|c| setup_concepts.contains(&c.as_str()));
+            let has_conflict = chain.iter().skip(chain.len()/3).take(chain.len()/3).any(|c| conflict_concepts.contains(&c.as_str()));
+            let has_resolution = chain.iter().skip(2*chain.len()/3).any(|c| resolution_concepts.contains(&c.as_str()));
+            
+            if has_setup && has_conflict && has_resolution {
+                arc_count += 1;
+            }
+        }
+    }
+    println!("  Chains with setup→conflict→resolution arc: {}/{}", arc_count, sorted_chains.len());
     
     println!("\nSample Daydream Steps:");
     for step in daydream.iter().step_by(10) {

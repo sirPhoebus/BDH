@@ -46,18 +46,18 @@ pub struct BiologicalConfig {
 impl Default for BiologicalConfig {
     fn default() -> Self {
         // TUNED config: targets 8-15 step bursts with high transition rate
-        // Strategy: BASELINE-like damping for short bursts, with higher activity drivers
+        // Strategy: very fast homeostasis to terminate bursts + high noise to restart
         Self {
-            noise_amplitude: 0.060,       // Higher noise for more frequent restarts
-            cross_freq_coupling: 0.34,    // Moderate coupling
-            homeostatic_threshold: 0.22,  // Slightly lower for faster boredom
-            homeostatic_rate: 0.10,       // Slightly faster adaptation
-            base_damping: 0.93,           // Slightly more decay than BASELINE
-            self_excitation: 0.018,       // Low self-excitation (like BASELINE)
-            endogenous_drive: 0.045,      // Higher to reduce resting periods
-            adaptive_noise_rate: 0.50,    // High - quickly boost noise during rest
+            noise_amplitude: 0.070,       // High noise for quick restarts
+            cross_freq_coupling: 0.36,    // Moderate coupling
+            homeostatic_threshold: 0.12,  // Very low = triggers boredom very early
+            homeostatic_rate: 0.28,       // Very fast adaptation = shorter bursts
+            base_damping: 0.89,           // Higher decay = shorter bursts
+            self_excitation: 0.028,       // Moderate self-excitation
+            endogenous_drive: 0.060,      // High to maintain activity
+            adaptive_noise_rate: 0.80,    // Very high - rapid recovery
             layer_frequencies: vec![],    // Empty = use default
-            boredom_delay: 4,             // Quick boredom onset for short resting periods
+            boredom_delay: 2,             // Boredom kicks in very fast
         }
     }
 }

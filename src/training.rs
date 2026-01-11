@@ -30,6 +30,8 @@ pub struct TrainingConfig {
     pub concept_coherence_weight: f32,
     /// Sparsity weight (encourages selective activation)
     pub sparsity_weight: f32,
+    /// Temporal consistency weight (penalizes large embedding jumps)
+    pub temporal_consistency_weight: f32,
 }
 
 impl Default for TrainingConfig {
@@ -45,8 +47,9 @@ impl Default for TrainingConfig {
             diversity_weight: 1.0,
             reconstruction_weight: 0.5,
             energy_reg_weight: 0.1,
-            concept_coherence_weight: 0.3,
+            concept_coherence_weight: 2.0,  // High for narrative coherence
             sparsity_weight: 0.2,
+            temporal_consistency_weight: 1.5,  // Penalize large jumps
         }
     }
 }
@@ -221,6 +224,42 @@ pub fn sparsity_loss(outputs: &[Array1<f32>], target_sparsity: f32) -> f32 {
     total_deviation / outputs.len() as f32
 }
 
+/// Temporal consistency loss: penalize large jumps in embedding space.
+/// Encourages smooth, narrative-like transitions between states.
+pub fn temporal_consistency_loss(outputs: &[Array1<f32>]) -> f32 {
+    if outputs.len() < 2 {
+        return 0.0;
+    }
+    
+    let mut total_jump = 0.0f32;
+    let mut count = 0;
+    
+    for i in 1..outputs.len() {
+        let prev = &outputs[i - 1];
+        let curr = &outputs[i];
+        
+        // Compute L2 distance between consecutive outputs
+        let diff = curr - prev;
+        let distance = diff.mapv(|d| d * d).sum().sqrt();
+        
+        // Normalize by vector magnitude to get relative change
+        let prev_norm = prev.mapv(|v| v * v).sum().sqrt().max(0.001);
+        let relative_jump = distance / prev_norm;
+        
+        // Penalize large relative jumps (threshold around 0.5)
+        if relative_jump > 0.3 {
+            total_jump += (relative_jump - 0.3).powi(2);
+        }
+        count += 1;
+    }
+    
+    if count > 0 {
+        total_jump / count as f32
+    } else {
+        0.0
+    }
+}
+
 /// Compute gradients via finite differences (simple but works for small models).
 pub fn compute_numerical_gradient(
     model: &mut HarmonicBdh,
@@ -304,12 +343,14 @@ impl Trainer {
                 let energy_loss_val = energy_regularization(&batch_energies, 0.3);
                 let coherence_loss = concept_coherence_loss(&batch_outputs, model);
                 let sparse_loss = sparsity_loss(&batch_outputs, 0.7);  // Target 70% sparsity
+                let temporal_loss = temporal_consistency_loss(&batch_outputs);
                 
                 let total_loss = self.config.diversity_weight * div_loss
                     + self.config.reconstruction_weight * recon_loss
                     + self.config.energy_reg_weight * energy_loss_val
                     + self.config.concept_coherence_weight * coherence_loss
-                    + self.config.sparsity_weight * sparse_loss;
+                    + self.config.sparsity_weight * sparse_loss
+                    + self.config.temporal_consistency_weight * temporal_loss;
                 
                 // Accumulate metrics
                 epoch_metrics.diversity_loss += div_loss;

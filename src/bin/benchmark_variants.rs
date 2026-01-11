@@ -323,16 +323,16 @@ fn main() {
         
         // 9. SHORT_BURST - targets 8-15 step bursts with high transition rate
         ("9. SHORT_BURST ★ (new default)", BiologicalConfig {
-            noise_amplitude: 0.060,
-            self_excitation: 0.018,
-            endogenous_drive: 0.045,
-            cross_freq_coupling: 0.34,
-            adaptive_noise_rate: 0.50,
-            homeostatic_threshold: 0.22,
-            homeostatic_rate: 0.10,
-            base_damping: 0.93,
+            noise_amplitude: 0.070,
+            self_excitation: 0.028,
+            endogenous_drive: 0.060,
+            cross_freq_coupling: 0.36,
+            adaptive_noise_rate: 0.80,
+            homeostatic_threshold: 0.12,
+            homeostatic_rate: 0.28,
+            base_damping: 0.89,
             layer_frequencies: vec![],
-            boredom_delay: 4,  // Quick boredom onset for short resting
+            boredom_delay: 2,
         }),
     ];
 
