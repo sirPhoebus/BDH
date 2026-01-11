@@ -220,6 +220,7 @@ fn main() {
             homeostatic_rate: 0.05,
             base_damping: 0.95,
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 2. WEAK ENDOGENOUS DRIVE - stronger L0 injection
@@ -233,6 +234,7 @@ fn main() {
             homeostatic_rate: 0.05,
             base_damping: 0.95,
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 3. VAN DER POL - stronger self-excitation
@@ -246,6 +248,7 @@ fn main() {
             homeostatic_rate: 0.03,  // Slower homeostasis
             base_damping: 0.96,      // Slightly less decay
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 4. BOTH - combined
@@ -259,6 +262,7 @@ fn main() {
             homeostatic_rate: 0.04,
             base_damping: 0.96,
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 5. AGGRESSIVE - push the limits
@@ -272,6 +276,7 @@ fn main() {
             homeostatic_rate: 0.06,
             base_damping: 0.97,
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 6. TUNED - aggressive but with faster homeostasis to limit burst length
@@ -285,6 +290,7 @@ fn main() {
             homeostatic_rate: 0.12,       // Fast adaptation
             base_damping: 0.94,           // More decay
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 7. BURSTY - designed for short frequent bursts
@@ -298,6 +304,7 @@ fn main() {
             homeostatic_rate: 0.15,       // Very fast adaptation
             base_damping: 0.92,           // High decay
             layer_frequencies: vec![],
+            boredom_delay: 10,
         }),
         
         // 8. OPTIMAL - balance between BURSTY and TUNED
@@ -311,6 +318,21 @@ fn main() {
             homeostatic_rate: 0.14,
             base_damping: 0.93,
             layer_frequencies: vec![],
+            boredom_delay: 10,
+        }),
+        
+        // 9. SHORT_BURST - targets 8-15 step bursts with high transition rate
+        ("9. SHORT_BURST ★ (new default)", BiologicalConfig {
+            noise_amplitude: 0.060,
+            self_excitation: 0.018,
+            endogenous_drive: 0.045,
+            cross_freq_coupling: 0.34,
+            adaptive_noise_rate: 0.50,
+            homeostatic_threshold: 0.22,
+            homeostatic_rate: 0.10,
+            base_damping: 0.93,
+            layer_frequencies: vec![],
+            boredom_delay: 4,  // Quick boredom onset for short resting
         }),
     ];
 

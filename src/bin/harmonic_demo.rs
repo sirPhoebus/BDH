@@ -62,6 +62,7 @@ fn main() {
         homeostatic_rate: 0.05,
         base_damping: 0.95,
         layer_frequencies: layer_freqs.clone(),
+        boredom_delay: 10,
     };
 
     let n = args.neurons;

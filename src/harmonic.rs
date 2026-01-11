@@ -39,21 +39,25 @@ pub struct BiologicalConfig {
     pub adaptive_noise_rate: f32,
     /// Layer frequencies (if empty, uses default progression)
     pub layer_frequencies: Vec<f32>,
+    /// Steps of low energy before adaptive noise kicks in (default: 10)
+    pub boredom_delay: usize,
 }
 
 impl Default for BiologicalConfig {
     fn default() -> Self {
-        // OPTIMAL config from benchmark_variants (best spontaneous activity)
+        // TUNED config: targets 8-15 step bursts with high transition rate
+        // Strategy: BASELINE-like damping for short bursts, with higher activity drivers
         Self {
-            noise_amplitude: 0.045,       // Higher noise for sustained activity
-            cross_freq_coupling: 0.38,    // Strong theta-gamma binding
-            homeostatic_threshold: 0.12,  // Low threshold = faster boredom
-            homeostatic_rate: 0.14,       // Fast adaptation
-            base_damping: 0.93,           // 7% base energy loss
-            self_excitation: 0.055,       // Strong van der Pol limit cycle
-            endogenous_drive: 0.028,      // Strong endogenous oscillation in layer 0
-            adaptive_noise_rate: 0.28,    // Fast noise adaptation
+            noise_amplitude: 0.060,       // Higher noise for more frequent restarts
+            cross_freq_coupling: 0.34,    // Moderate coupling
+            homeostatic_threshold: 0.22,  // Slightly lower for faster boredom
+            homeostatic_rate: 0.10,       // Slightly faster adaptation
+            base_damping: 0.93,           // Slightly more decay than BASELINE
+            self_excitation: 0.018,       // Low self-excitation (like BASELINE)
+            endogenous_drive: 0.045,      // Higher to reduce resting periods
+            adaptive_noise_rate: 0.50,    // High - quickly boost noise during rest
             layer_frequencies: vec![],    // Empty = use default
+            boredom_delay: 4,             // Quick boredom onset for short resting periods
         }
     }
 }
@@ -250,14 +254,15 @@ impl HarmonicBdh {
     /// Update adaptive noise based on energy levels.
     fn update_adaptive_noise(&mut self, layer: usize, current_energy: f32) {
         let low_threshold = self.config.homeostatic_threshold * 0.3;
+        let delay = self.config.boredom_delay;
         
         if current_energy < low_threshold {
             self.low_energy_duration[layer] += 1;
             
-            // After 10+ steps of low energy, increase noise (boredom → exploration)
-            if self.low_energy_duration[layer] > 10 {
+            // After boredom_delay steps of low energy, increase noise (boredom → exploration)
+            if self.low_energy_duration[layer] > delay {
                 let boost = self.config.adaptive_noise_rate 
-                    * (self.low_energy_duration[layer] as f32 - 10.0).min(20.0) / 20.0;
+                    * (self.low_energy_duration[layer] as f32 - delay as f32).min(20.0) / 20.0;
                 self.adaptive_noise[layer] = (self.adaptive_noise[layer] + boost)
                     .min(self.config.noise_amplitude * 5.0);
             }
