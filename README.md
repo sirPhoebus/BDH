@@ -2,42 +2,87 @@
 
 A Rust implementation of a biologically-inspired neural architecture that merges **Hebbian learning**, **Harmonic resonance**, and **Embodied Cognition**.
 
-## Grand Unification
+This project simulates a brain that doesn't just process data, but **feels**, **needs**, and **dreams**.
 
-The system is now an **Embodied Cognitive Architecture**, consisting of three coupled feedback loops:
+## 🧠 Grand Unification (Central Sim)
+
+The core executable `central_sim` integrates three originally separate feedback loops into a single cohesive entity:
 
 1.  **The Brain (Cortex)**:
     *   **GPU-Accelerated**: Using `burn` + `wgpu` for massive parallel dynamics.
     *   **Harmonic**: Neurons oscillate and bind via phase coherence (Theta-Gamma coupling).
-    *   **Plastic**: Weights evolve via Hebbian learning modulated by Arousal.
+    *   **Plastic**: Weights evolve via Hebbian learning, modulated dynamically by Neurotransmitters.
 
 2.  **The Body (Physiology)**:
     *   **Homeostasis**: Tracks Energy, Integrity, and Arousal.
-    *   **Valence**: Pain/Pleasure signals drive the brain's "Noise" level (Thrashing vs. Settling).
-    *   **Arousal**: Stress/Excitement modulates Plasticity (Input Gain).
+    *   **Neurochemistry**: 
+        *   **Dopamine (DA)**: Driven by reward/prediction error.
+        *   **Norepinephrine (NE)**: Driven by stress/arousal.
+        *   **Acetylcholine (ACh)**: Modulate attention and memory encoding.
+    *   **Drives**: Explicit **Hunger** (for data) and **Curiosity** (for novelty) shift the agent's behavior.
 
-3.  **The Mind (Interpreter)**:
-    *   **Reflection Loop**: The brain's output is decoded into language ("I notice X").
-    *   **Self-Talk**: This narrative is re-embedded into a vector and fed back as input ("Dreaming").
-    *   **Drives**: Explicit Hunger and Curiosity states shift the brain between "Seeking", "Playing", and "Resting" modes.
+3.  **The Mind (Cognition)**:
+    *   **Episodic Memory**: Hippocampal replay of high-valence events.
+    *   **Associative Chaining**: "Dreaming" state where thoughts drift based on semantic similarity.
+    *   **Interpreter**: Decodes neural states into English narrative ("I feel...").
 
-## Architecture
+## 📊 Real-Time Telemetry
+
+The system exposes its internal state in real-time via `probe.json`. A Python companion tool visualizes this data live.
+
+### Included Visualization (`monitor_probe.py`)
+Plots the following metrics in real-time:
+- **Coherence**: How synchronized the brain states are.
+- **Diversity**: The richness of concepts currently being activated.
+- **Energy Stability**: Metabolic health of the simulation.
+- **Concepts Learned**: Accumulation of novel patterns.
+
+### 3D Visualization (Web)
+The simulation also hosts a local web server for 3D monitoring.
+- **URL**: `http://localhost:3000`
+- **Features**: Real-time 3D view of neuronal firing, region highlighting, and neurotransmitter levels.
+
+## 🚀 Quick Start
+
+### 1. Prerequisites
+- **Rust**: Latest stable.
+- **Python**: 3.8+ with `matplotlib` for the visualizer.
+  ```bash
+  pip install matplotlib
+  ```
+
+### 2. Run the Simulation + Monitor
+
+**Terminal 1 (Visualization):**
+Start this first to catch the early data.
+```bash
+python monitor_probe.py
+```
+
+**Terminal 2 (The Brain):**
+```bash
+cargo run --release --bin central_sim
+```
+
+*Note: The simulation runs in "Silent Mode" in the terminal to optimize performance. Watch the graphs window for activity.*
+
+## 🏗️ Architecture
 
 ```
         Environment / Corpus
                 │
                 ▼
         [Semantic Encoder] <───┐
-                │              │ (Reflection Loop)
+                │              │ (Dream/Reflection Loop)
                 ▼              │
         ┌────────────────┐     │
         │  CORTEX (GPU)  │ ────┘
         │   Harmonic ρ   │
         └───────┬────────┘
-                │ (Modulation: Noise, Damping, Gain)
+                │ (Modulation: DA, NE, ACh)
                 ▲
         ┌───────┴────────┐
-        │     DRIVES     │ (Hunger, Curiosity)
+        │   NEUROCHEM    │ (Drives: Hunger, Curiosity)
         └───────┬────────┘
                 ▲
         ┌───────┴────────┐
@@ -45,61 +90,28 @@ The system is now an **Embodied Cognitive Architecture**, consisting of three co
         └────────────────┘
 ```
 
-## Quick Start
-
-### Grand Unification Simulation
-Run the complete system with Body, Brain, and Interpreter loop:
-```bash
-cargo run --bin central_sim
-```
-*Watch the console for the interplay of Energy (metabolism), Valence (emotional reaction to concepts), and Mode switching (Reading vs. Dreaming).*
-
-### Other Demos
-```bash
-# Old CPU-based harmonic demo
-cargo run --bin harmonic_demo
-
-# Train embeddings
-cargo run --bin train -- --download --epochs 20
-```
-
-## Modules
+## 🧩 Modules
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `HarmonicBdhBurn` | `harmonic_burn.rs` | **GPU Core**. Tensor-based implementation of harmonic dynamics. |
-| `BodyState` | `body.rs` | Physiological simulation (Energy, Integrity, Arousal). |
-| `Drives` | `drives.rs` | Intrinsic motivation (Hunger, Curiosity) -> Brain Parameters. |
-| `Interpreter` | `interpreter.rs` | Language-to-Vector reflection loop ("Inner Voice"). |
-| `Embedder` | `data.rs` | Semantic grounding (Word <-> Vector). |
+| `central_sim` | `src/bin/central_sim.rs` | **Main Entrypoint**. The "Grand Loop" integrating all systems. |
+| `monitor_probe.py` | `monitor_probe.py` | **Telemetry**. Real-time graphing tool. |
+| `HarmonicBdhBurn` | `src/harmonic_burn.rs` | **GPU Core**. Tensor-based physics of the neural substrate. |
+| `BodyState` | `src/body.rs` | Physiological sumulation. |
+| `Drives` | `src/drives.rs` | Intrinsic motivation engine. |
+| `MemorySystem` | `src/memory.rs` | Vector database for Hippocampal/Episodic storage. |
+| `Continual` | `src/continual.rs` | Adaptive forgetting and experience replay logic. |
 
-## Biological Mechanisms
+## 🔮 Roadmap
 
-### (A) Embodiment Loop
-Concepts are not just Math; they are Feelings.
-- **Safety**: Triggers Positive Valence -> Reduces Neural Noise -> Stabilizes State.
-- **Danger**: Triggers Negative Valence (Pain) -> Increases Neural Noise -> Destabilizes State (Flight/Fight).
-
-### (B) Arousal-Modulated Plasticity
-- **High Arousal** (Stress/Excitement): Increases Input Gain. The brain "pay attentions" and learns instantly.
-- **Low Arousal** (Sleep/Boredom): Decreases Input Gain. The brain ignores external stimuli and consolidates.
-
-### (C) Reflection (Dreaming)
-When biological drives (Energy) are low, the system disconnects from external text and enters a **Default Mode Network** state:
-1.  Decode current neural state -> "I notice Safety"
-2.  Extract keyword -> "Safety"
-3.  Embed keyword -> Vector input
-4.  Feed back into brain -> Associative drift
-
-## Roadmap
-- [x] GPU Acceleration (`burn`)
-- [x] Embodiment (Body State)
-- [x] Explicit Drives
-- [x] Interpreter / Reflection Loop
-- [x] Semantic Grounding
-- [ ] Metacognition (Confidence monitoring)
-- [ ] Real-time Audio Input
-- [ ] Multi-Modal binding
+- [x] GPU Acceleration (`burn` + `wgpu`)
+- [x] Bio-Chemical Modulation (DA/NE/ACh)
+- [x] Embodiment & Homeostasis
+- [x] Episodic Memory & Replay
+- [x] Real-time Telemetry Probing
+- [ ] Metacognition (Confidence-aware planning)
+- [ ] Multi-Modal Input (Audio/Visual binding)
+- [ ] Sleep-Wake Cycles (Circadian Rhythm)
 
 ## License
 MIT
