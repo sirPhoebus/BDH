@@ -1,15 +1,15 @@
 {
-                    "step": 2470,
-                    "coherence": 0.0414,
-                    "diversity": 4.4720,
+                    "step": 2500,
+                    "coherence": 0.0423,
+                    "diversity": 4.4652,
                     "concepts_learned": 40,
-                    "energy_stability": 0.7406,
-                    "read_steps": 1278,
-                    "dream_steps": 1192,
+                    "energy_stability": 0.8231,
+                    "read_steps": 1293,
+                    "dream_steps": 1207,
                     "mem_stores": 647,
                     "mem_recalls": 59,
-                    "chunk_ptr": 1278,
+                    "chunk_ptr": 1293,
                     "book_chunks": 1489,
                     "surprise": 0.0000,
-                    "cortical_energy": 0.3182
+                    "cortical_energy": 0.3246
                 }
