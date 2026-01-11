@@ -8,6 +8,45 @@ use std::time::Duration;
 use std::thread;
 use ndarray::Array1;
 
+use std::collections::VecDeque;
+
+/// A simple episodic memory of a high-affect event.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct EpisodicMemory {
+    embedding: Array1<f32>,
+    concept: String,
+    valence: f32, // How strongly it was felt
+}
+
+struct EpisodicBuffer {
+    memories: VecDeque<EpisodicMemory>,
+    capacity: usize,
+}
+
+impl EpisodicBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            memories: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn add(&mut self, embedding: Array1<f32>, concept: String, valence: f32) {
+        if self.memories.len() >= self.capacity {
+            self.memories.pop_front(); // Forget oldest
+        }
+        self.memories.push_back(EpisodicMemory { embedding, concept, valence });
+    }
+
+    fn sample(&self) -> Option<EpisodicMemory> {
+        if self.memories.is_empty() { return None; }
+        // Simple random sample
+        let idx = rand::random::<usize>() % self.memories.len();
+        self.memories.get(idx).cloned()
+    }
+}
+
 fn main() {
     println!("Initializing CENTRAL SIM (Grand Unification)...");
     
@@ -56,6 +95,7 @@ fn main() {
     println!("   Embedder ready. Vocab size: {}", embedder.vocab_size);
     
     // Initialize Reader State
+    let mut episodic_buffer = EpisodicBuffer::new(50);
     let mut current_book_idx = 0;
     let mut current_tokens: Vec<u32> = embedder.tokenize(&books[0]);
     let mut token_ptr = 0;
@@ -123,7 +163,7 @@ fn main() {
         }
         
         // Drive Modulation (shifts targets, physics handled by chemicals now)
-        let modulation = drives.get_modulation();
+        let _modulation = drives.get_modulation();
         // We override damping from neurochem if drive is strong?
         // Let's let Neurochem be the final arbiter of physics.
         
@@ -144,8 +184,8 @@ fn main() {
         
         // Prepare final bias tensor (Goal + Echo)
         // Echo: Feed back last narrative weakly
-        let mut total_bias_vec = if let Some(b) = bias_input {
-             b.mul_scalar(0.2) // Weak goal
+        let mut total_bias_vec = if let Some(ref b) = bias_input {
+             b.clone().mul_scalar(0.2) // Weak goal
         } else {
              Tensor::<Backend, 1>::zeros([n_neurons], &device)
         };
@@ -162,9 +202,22 @@ fn main() {
         let bias_3d = total_bias_vec.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
 
 
-        // --- D. Agency / Action Selection (Homeostatic) ---
-        // Determine Action to minimize Homeostatic Error (Maximize Wellbeing)
+        // --- D. Agency / Action Selection (Homeostatic + Conflict) ---
         
+        // 1. Perception/Appraisal
+        // Check alignment with Drives (Foraging)
+        let cortical_out = cortex.get_cortical_output();
+        let state_vec = Array1::from(cortical_out.clone());
+        let goal_match = if let Some(ref goal) = bias_input {
+             // Approximate dot product with Goal Vector
+             // (Assuming normalized vectors, this is cosine sim)
+             let goal_vec: Vec<f32> = goal.clone().into_data().iter::<f32>().collect();
+             let goal_arr = Array1::from_vec(goal_vec);
+             state_vec.dot(&goal_arr)
+        } else {
+             0.0 
+        };
+
         enum Action {
             Read,
             Skip,      
@@ -172,17 +225,20 @@ fn main() {
             Dream,     
         }
 
-        // Homeostatic Policy
-        // 1. Energy Low (Low ACh) -> DREAM (Rest/Consolidate)
-        // 2. High NE (Panic/Boredom) -> SKIP (Escape/Search)
-        // 3. High DA (Flow) -> READ (Sustain)
-        // 4. High Curiosity -> REFLECT (Meta-cognitive check)
-        
-        // Thresholds: Raise ACh threshold to 0.6 to see dreaming sooner for demo
+        // 2. Policy (Homeostatic + Conflict Resolution)
         let action = if body.chemicals.acetylcholine < 0.6 {
              Action::Dream
         } else if body.chemicals.norepinephrine > 0.8 {
              Action::Skip // Panic/Overwhelmed
+        } else if drives.hunger > 0.7 && goal_match < 0.2 {
+             // FORAGING MODE: Hungry but current context isn't satisfying.
+             // Conflict: If Curiosity is also high, do we stay?
+             // If Novelty is High, we might stay even if hungry (Exploration).
+             if drives.curiosity > 0.7 && novelty > 0.5 {
+                 Action::Read // Stay for novelty (Curiosity > Hunger locally)
+             } else {
+                 Action::Skip // Move on (Hunger > Curiosity)
+             }
         } else if drives.curiosity > 0.7 && step % 40 == 0 {
              Action::Reflect
         } else {
@@ -194,42 +250,53 @@ fn main() {
         
         match action {
              Action::Dream => {
-                // --- DREAMING (Deep Reflection / Self-Thinking) ---
-                // No external input. We feed the Cortex its own output (Associative Chaining).
-                let cortical_out = cortex.get_cortical_output();
-                let output_arr = Array1::from(cortical_out);
-                let (next_token, confidence) = embedder.decode_nearest(&output_arr);
-                
-                input_word = format!("~{}~", next_token); // denote dream
+                // --- DREAMING (Episodic Replay + Chaining) ---
                 prediction = "(Internal)".to_string();
                 
-                // Feedback: Stronger Self-Excitation loop
-                let self_talk = format!("I imagine {}", next_token);
-                let feedback_vector = interpreter.reflect(&self_talk, &embedder);
-                let emb_vec = feedback_vector.to_vec();
-                let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
+                // Chance to replay a memory (Reminiscence)
+                let replay_trigger = rand::random::<f32>() < 0.15; // 15% chance per step
                 
-                // Dream Input is weaker/noisier? Or Stronger?
-                // Strong recurrent input drives the hallucination.
+                let input_tensor = if replay_trigger {
+                    if let Some(mem) = episodic_buffer.sample() {
+                         input_word = format!("*{}*", mem.concept); // *Mem*
+                         // Re-inject memory state
+                         Tensor::<Backend, 1>::from_floats(mem.embedding.to_vec().as_slice(), &device)
+                    } else {
+                        // Fallback to Chaining if buffer empty
+                        let output_arr = Array1::from(cortex.get_cortical_output());
+                        let (next_token, _confidence) = embedder.decode_nearest(&output_arr);
+                        input_word = format!("~{}~", next_token);
+                        
+                        let self_talk = format!("I imagine {}", next_token);
+                        let feedback_vector = interpreter.reflect(&self_talk, &embedder);
+                        Tensor::<Backend, 1>::from_floats(feedback_vector.to_vec().as_slice(), &device)
+                    }
+                } else {
+                    // Standard Associative Chaining
+                    let output_arr = Array1::from(cortex.get_cortical_output());
+                    let (next_token, _confidence) = embedder.decode_nearest(&output_arr);
+                    input_word = format!("~{}~", next_token);
+                    
+                    // Feedback Loop
+                    let self_talk = format!("I imagine {}", next_token);
+                    let feedback_vector = interpreter.reflect(&self_talk, &embedder);
+                    Tensor::<Backend, 1>::from_floats(feedback_vector.to_vec().as_slice(), &device)
+                };
+
+                // Apply Input
                 let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                 cortex.step(Some(input_3d));
                 
-                // Dreaming recovers Energy (Sleep)
+                // Dreaming recovers Energy
                 body.energy = (body.energy + 0.01).min(1.0);
-                
-                // If the dream is vivid (high confidence), boost Dopamine (Pleasure of thinking)
-                if confidence > 0.8 {
-                     body.chemicals.dopamine = (body.chemicals.dopamine + 0.05).min(1.0);
-                }
              },
              
              Action::Reflect => {
-                 // --- REFLECTION (Shallow) ---
-                 // Stop reading, look at last thought, reinforce it.
+                 // --- REFLECTION ---
                  prediction = "(Reflecting)".to_string();
                  if !last_narrative.is_empty() {
                       input_word = "self".to_string();
-                      let echo_vec = interpreter.reflect(&last_narrative, &embedder); // Stronger than echo loop
+                      let echo_vec = interpreter.reflect(&last_narrative, &embedder);
                       let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
                       let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                       cortex.step(Some(input_3d));
@@ -239,23 +306,20 @@ fn main() {
              },
              
              Action::Skip => {
-                 // --- SKIPPING ---
-                 // Fast forward to find novelty
+                 // --- SKIPPING (Foraging) ---
                  input_word = ">>".to_string();
                  token_ptr += 10;
-                 if token_ptr >= current_tokens.len() { token_ptr = 0; } // wrap safety
-                 
-                 // Small energy cost for skipping
+                 if token_ptr >= current_tokens.len() { token_ptr = 0; } 
                  body.energy = (body.energy - 0.002).max(0.0);
-                 cortex.step(None); // Brain is "offline" while skipping
+                 cortex.step(None);
              },
              
              Action::Read => {
-                 // --- READING (Standard) ---
+                 // --- READING ---
                 // 1. Prediction
                 let cortical_out = cortex.get_cortical_output();
                 let out_vec = Array1::from(cortical_out);
-                let (predicted_token, _conf) = embedder.decode_nearest(&out_vec);
+                let (predicted_token, _confidence) = embedder.decode_nearest(&out_vec);
                 prediction = predicted_token;
     
                 // 2. Read actual word
@@ -268,18 +332,15 @@ fn main() {
                     let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
                     let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                     
-                    // Add Modulatory Bias (Goal + Echo)
                     let final_input = input_3d.add(bias_3d);
-                    
                     cortex.step(Some(final_input));
                     
-                    // Reading CONSUMES Energy (Mental Effort)
                     body.energy = (body.energy - 0.005).max(0.0);
-                    
                     token_ptr += 1;
                 } else {
                     cortex.step(None);
                     input_word = "<END>".to_string();
+                    // Keep Hunger book-switching logic? Yes.
                     if drives.hunger > 0.8 {
                         current_book_idx = (current_book_idx + 1) % books.len();
                         current_tokens = embedder.tokenize(&books[current_book_idx]);
@@ -359,6 +420,14 @@ fn main() {
 
             if env_valence != 0.0 {
                 body.update(0.1, env_valence);
+            }
+            
+            // --- MEMORY ENCODING ---
+            // Significant events are stored in Episodic Buffer
+            if body.pleasure_pain.abs() > 0.5 || body.arousal > 0.8 {
+                 let cortical_out = cortex.get_cortical_output();
+                 let state_vec = Array1::from(cortical_out);
+                 episodic_buffer.add(state_vec, best_concept.to_string(), body.pleasure_pain);
             }
             // -----------------------
 

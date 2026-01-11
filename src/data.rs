@@ -93,7 +93,7 @@ impl Embedder {
     pub fn train_on_corpus(texts: &[String], vocab_size: usize, n: usize) -> io::Result<Self> {
         println!("Training BPE Tokenizer on {} texts...", texts.len());
         
-        let mut builder = BpeBuilder::new();
+        let builder = BpeBuilder::new();
         let bpe = builder.build().unwrap(); 
         let mut tokenizer = Tokenizer::new(bpe); // This wraps BPE in ModelWrapper
         
