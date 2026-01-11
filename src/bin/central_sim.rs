@@ -78,6 +78,16 @@ fn main() {
 
     let mut step = 0;
     
+    // 7. Goal Vectors (Drive Targets)
+    // We create "Attractors" for drives.
+    // "Food" for Hunger. "Mystery" for Curiosity.
+    let food_vec = embedder.embed_text("food eat delicious satisfy").row(0).to_owned();
+    let novelty_vec = embedder.embed_text("mystery strange new discover").row(0).to_owned();
+    let food_vec = Tensor::<Backend, 1>::from_floats(food_vec.to_vec().as_slice(), &device);
+    let novelty_vec = Tensor::<Backend, 1>::from_floats(novelty_vec.to_vec().as_slice(), &device);
+
+    let mut last_narrative = "".to_string();
+
     loop {
         step += 1;
         
@@ -124,6 +134,43 @@ fn main() {
         // High Arousal = High Gain (Alert, taking in info)
         // Low Arousal = Low Gain (Sleepy, ignore stats)
         cortex.set_input_gain(body.arousal.max(0.1));
+        
+        // Calculate Bias Tensor here to be available for both Reading and Dreaming (if needed)
+        // 2. Drive Goal Injection (Bias)
+        // Instead of just damping, we inject a "Wanting" vector.
+        let mut bias_input: Option<Tensor<Backend, 1>> = None;
+        
+        match current_drive.as_deref() {
+            Some("HUNGER") => {
+                 // Inject Food Bias
+                 bias_input = Some(food_vec.clone());
+                 // println!("   (Hunger -> seeking food)");
+            },
+            Some("CURIOSITY") => {
+                 // Inject Novelty Bias
+                 bias_input = Some(novelty_vec.clone());
+            },
+            _ => {},
+        }
+        
+        // Prepare final bias tensor (Goal + Echo)
+        // Echo: Feed back last narrative weakly
+        let mut total_bias_vec = if let Some(b) = bias_input {
+             b.mul_scalar(0.2) // Weak goal
+        } else {
+             Tensor::<Backend, 1>::zeros([n_neurons], &device)
+        };
+
+        // Echo Loop (Working Memory)
+        // Every step, we hear a faint echo of our last thought.
+        if !last_narrative.is_empty() && step % 5 == 0 {
+             let echo_vec = interpreter.reflect(&last_narrative, &embedder);
+             let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
+             total_bias_vec = total_bias_vec.add(echo_tensor.mul_scalar(0.1)); // Very weak echo
+        }
+
+        // Expand Bias for Addition
+        let bias_3d = total_bias_vec.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
 
 
         // --- D. Input Processing (Reading OR Dreaming) ---
@@ -192,7 +239,10 @@ fn main() {
                 // Reshape [Neurons] -> [1, 1, Neurons] -> Broadcast
                 let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                 
-                cortex.step(Some(input_3d));
+                // Add Modulatory Bias (Goal + Echo)
+                let final_input = input_3d.add(bias_3d);
+                
+                cortex.step(Some(final_input));
                 
                 body.energy = (body.energy + 0.01).min(1.0);
                 token_ptr += 1;
@@ -269,6 +319,7 @@ fn main() {
 
             let concepts = vec![(best_concept, best_score)];
             let narrative = interpreter.interpret(&concepts, confidence);
+            last_narrative = narrative.clone();
 
             println!("{:4} | {:<4.2}   | {:>+5.2} | {:<6} | {:<4.2} | {:<15} | {:<15} | {}", 
                 step, 

@@ -32,6 +32,7 @@ pub struct HarmonicBdhBurn<B: Backend> {
     base_dt: f32,
     pub noise_scale: f32,
     pub input_gain: f32,
+    pub self_excitation: f32,
 }
 
 impl<B: Backend> HarmonicBdhBurn<B> {
@@ -83,6 +84,7 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             base_dt: 0.01,
             noise_scale: 0.0,
             input_gain: 1.0,
+            self_excitation: 0.0,
         }
     }
 
@@ -94,6 +96,34 @@ impl<B: Backend> HarmonicBdhBurn<B> {
     /// Set input gain (plasticity/sensitivity).
     pub fn set_input_gain(&mut self, gain: f32) {
         self.input_gain = gain;
+    }
+
+    /// Modulate brain parameters based on body signals.
+    /// Tight integration of Embodiment.
+    pub fn modulate_from_signals(&mut self, energy: f32, valence: f32) {
+        // 1. Energy -> Theta Frequency & Damping
+        // Low energy (< 0.4) -> Slower waves, higher damping (Conservation/Rest)
+        if energy < 0.4 {
+             // We can't easily multiply frequencies here persistently without drift unless we store base freq.
+             // For now, let's just Modulate Damping.
+             self.set_damping(0.98); // High damping
+        } else {
+             self.set_damping(0.95); // Normal damping
+        }
+        
+        // 2. Pain (Valence < -0.3) -> Noise (Thrashing/Avoidance)
+        if valence < -0.3 {
+            self.noise_scale = 0.08 + (valence.abs() * 0.1);
+        } else {
+            self.noise_scale = 0.01;
+        }
+
+        // 3. Pleasure (Valence > 0.4) -> Self-Excitation (Resonance/Sustain)
+        if valence > 0.4 {
+            self.self_excitation = 0.05; // Lock in this state
+        } else {
+            self.self_excitation = 0.0;
+        }
     }
 
     /// Step the dynamics forward using Euler integration on the GPU.
@@ -132,7 +162,26 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         let d = self.damping.clone().reshape([self.num_layers, 1, 1]); // [Layers, 1, 1]
         
         let mut d_real = d_real.sub(real.clone().mul(d.clone()));
-        let d_imag = d_imag.sub(imag.clone().mul(d));
+        let mut d_imag = d_imag.sub(imag.clone().mul(d));
+
+        // Van der Pol Self-Excitation
+        // dX += mu * X * (1 - r^2)
+        if self.self_excitation > 0.0 {
+            // Calculate r^2 = Real^2 + Imag^2
+            // Use clone() because powf_scalar consumes self
+            let r2 = real.clone().powf_scalar(2.0).add(imag.clone().powf_scalar(2.0));
+            // Term: (1 - r^2)
+            let term = r2.mul_scalar(-1.0).add_scalar(1.0); // 1 - r^2
+            
+            // Real part contribution
+            let vdp_real = real.clone().mul(term.clone()).mul_scalar(self.self_excitation);
+            d_real = d_real.add(vdp_real);
+            
+            // Imag part contribution? Usually VdP is on the variable itself. 
+            // In complex oscillator, applying to both keeps phase but modulates amplitude.
+            let vdp_imag = imag.clone().mul(term).mul_scalar(self.self_excitation);
+            d_imag = d_imag.add(vdp_imag);
+        }
         
         // Inject Input if present
         // Input assumed to affect Real part (driving current)
