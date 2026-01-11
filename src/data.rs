@@ -9,6 +9,7 @@
 use ndarray::{Array1, Array2};
 use ndarray_rand::{rand_distr::Normal, RandomExt};
 use rand::thread_rng;
+use rayon::prelude::*;
 use std::fs;
 use std::io;
 use walkdir::WalkDir;
@@ -248,6 +249,27 @@ impl Embedder {
         let mut rng = rand::thread_rng();
         let id = rng.gen_range(0..self.vocab_size as u32);
         (self.decode(&[id]), id)
+    }
+
+    /// Embed a sequence of tokens into a single accumulated vector (mean pooling).
+    /// Uses parallel iteration for speed.
+    pub fn embed_sequence(&self, tokens: &[u32]) -> Array1<f32> {
+        if tokens.is_empty() {
+            return Array1::zeros(self.n);
+        }
+        // Sum embeddings in parallel
+        let sum: Array1<f32> = tokens.par_iter()
+            .map(|&t| self.embed_token(t))
+            .reduce(|| Array1::zeros(self.n), |a, b| a + b);
+        sum / tokens.len() as f32
+    }
+    
+    /// Pre-embed entire corpus into windowed chunks using all CPU cores.
+    /// Returns a vector of mean-pooled embeddings for each window.
+    pub fn preembed_corpus_parallel(&self, tokens: &[u32], window_size: usize) -> Vec<Array1<f32>> {
+        tokens.par_chunks(window_size)
+            .map(|chunk| self.embed_sequence(chunk))
+            .collect()
     }
 }
 

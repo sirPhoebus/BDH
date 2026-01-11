@@ -68,6 +68,148 @@ impl EpisodicBuffer {
     }
 }
 
+/// Learning quality metrics - tracks if the brain is actually improving
+struct LearningMetrics {
+    // Track which concepts the brain recognizes (diversity measure)
+    concept_counts: std::collections::HashMap<String, usize>,
+    total_recognitions: usize,
+    
+    // Semantic coherence over time (embedding similarity)
+    coherence_samples: Vec<f32>,
+    
+    // Novel learning: how many new concepts discovered
+    concepts_at_start: usize,
+    concepts_now: usize,
+    
+    // Dream/Read ratio (healthy = balanced)
+    dream_steps: usize,
+    read_steps: usize,
+    
+    // Energy stability (learning requires sustained attention)
+    energy_samples: Vec<f32>,
+    
+    // History for trend analysis
+    coherence_history: Vec<(usize, f32)>,  // (step, avg_coherence)
+    
+    // Episodic memory engagement
+    memory_recalls: usize,
+    memory_stores: usize,
+}
+
+impl LearningMetrics {
+    fn new(initial_concepts: usize) -> Self {
+        Self {
+            concept_counts: std::collections::HashMap::new(),
+            total_recognitions: 0,
+            coherence_samples: Vec::new(),
+            concepts_at_start: initial_concepts,
+            concepts_now: initial_concepts,
+            dream_steps: 0,
+            read_steps: 0,
+            energy_samples: Vec::new(),
+            coherence_history: Vec::new(),
+            memory_recalls: 0,
+            memory_stores: 0,
+        }
+    }
+    
+    fn record_concept(&mut self, concept: &str) {
+        *self.concept_counts.entry(concept.to_string()).or_insert(0) += 1;
+        self.total_recognitions += 1;
+    }
+    
+    fn record_coherence(&mut self, score: f32, step: usize) {
+        self.coherence_samples.push(score);
+        if self.coherence_samples.len() > 100 {
+            self.coherence_samples.remove(0);
+        }
+        
+        // Record history every 100 steps
+        if step > 0 && step % 100 == 0 && !self.coherence_samples.is_empty() {
+            let avg = self.coherence_samples.iter().sum::<f32>() / self.coherence_samples.len() as f32;
+            self.coherence_history.push((step, avg));
+        }
+    }
+    
+    fn record_energy(&mut self, energy: f32) {
+        self.energy_samples.push(energy);
+        if self.energy_samples.len() > 100 {
+            self.energy_samples.remove(0);
+        }
+    }
+    
+    fn record_action(&mut self, is_reading: bool) {
+        if is_reading { self.read_steps += 1; } else { self.dream_steps += 1; }
+    }
+    
+    fn record_concept_learned(&mut self) {
+        self.concepts_now += 1;
+    }
+    
+    fn record_memory_store(&mut self) { self.memory_stores += 1; }
+    fn record_memory_recall(&mut self) { self.memory_recalls += 1; }
+    
+    fn concept_diversity(&self) -> f32 {
+        if self.total_recognitions == 0 { return 0.0; }
+        let unique = self.concept_counts.len() as f32;
+        let total = self.total_recognitions as f32;
+        // Entropy-like measure: higher = more diverse, max = 1.0
+        unique / total.sqrt()
+    }
+    
+    fn avg_coherence(&self) -> f32 {
+        if self.coherence_samples.is_empty() { return 0.0; }
+        self.coherence_samples.iter().sum::<f32>() / self.coherence_samples.len() as f32
+    }
+    
+    fn coherence_trend(&self) -> f32 {
+        if self.coherence_history.len() < 3 { return 0.0; }
+        let n = self.coherence_history.len();
+        let first = self.coherence_history[0].1;
+        let last = self.coherence_history[n - 1].1;
+        last - first
+    }
+    
+    fn learning_rate(&self) -> f32 {
+        (self.concepts_now - self.concepts_at_start) as f32
+    }
+    
+    fn energy_stability(&self) -> f32 {
+        if self.energy_samples.len() < 2 { return 0.0; }
+        let mean: f32 = self.energy_samples.iter().sum::<f32>() / self.energy_samples.len() as f32;
+        let variance: f32 = self.energy_samples.iter().map(|e| (e - mean).powi(2)).sum::<f32>() / self.energy_samples.len() as f32;
+        1.0 / (1.0 + variance.sqrt()) // Higher = more stable
+    }
+    
+    fn print_benchmark(&self, step: usize) {
+        let trend = self.coherence_trend();
+        let trend_symbol = if trend > 0.01 { "📈" } else if trend < -0.01 { "📉" } else { "➡️" };
+        
+        println!("\n╔══════════════════════════════════════════════════════════════════════════╗");
+        println!("║                  LEARNING BENCHMARK @ Step {:>6}                        ║", step);
+        println!("╠══════════════════════════════════════════════════════════════════════════╣");
+        println!("║  Concept Diversity:  {:.3} ({} unique concepts seen)              ║", 
+                 self.concept_diversity(), self.concept_counts.len());
+        println!("║  Semantic Coherence: {:.3} {} (trend: {:+.3})                      ║", 
+                 self.avg_coherence(), trend_symbol, trend);
+        println!("║  Concepts Learned:   {} (started with {})                           ║", 
+                 self.concepts_now, self.concepts_at_start);
+        println!("║  Energy Stability:   {:.3}                                            ║", 
+                 self.energy_stability());
+        println!("║  Read/Dream Ratio:   {}/{}                                         ║", 
+                 self.read_steps, self.dream_steps);
+        println!("║  Memory: {} stores, {} recalls                                         ║", 
+                 self.memory_stores, self.memory_recalls);
+        
+        // Show top concepts
+        let mut top: Vec<_> = self.concept_counts.iter().collect();
+        top.sort_by(|a, b| b.1.cmp(a.1));
+        let top3: Vec<_> = top.iter().take(3).map(|(k, v)| format!("{}:{}", k, v)).collect();
+        println!("║  Top Concepts:       {:?}                                              ║", top3);
+        println!("╚══════════════════════════════════════════════════════════════════════════╝\n");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     println!("Initializing CENTRAL SIM (Grand Unification)...");
@@ -135,8 +277,16 @@ async fn main() {
     // Initialize Reader State
     let mut episodic_buffer = EpisodicBuffer::new(50);
     let mut current_book_idx = 0;
-    let mut current_tokens: Vec<u32> = embedder.tokenize(&books[0]);
-    let mut token_ptr = 0;
+    let current_tokens: Vec<u32> = embedder.tokenize(&books[0]);
+    
+    // PRE-EMBED: Process entire corpus in parallel using all CPU cores
+    let window_size = 64; // Semantic chunks
+    println!("   Pre-embedding corpus (parallel, window={})...", window_size);
+    let mut preembedded: Vec<ndarray::Array1<f32>> = embedder.preembed_corpus_parallel(&current_tokens, window_size);
+    let mut chunk_ptr = 0;
+    println!("   Created {} semantic chunks from {} tokens ({:.1}x compression)", 
+             preembedded.len(), current_tokens.len(), 
+             current_tokens.len() as f32 / preembedded.len() as f32);
     
     // 6. Concept Memory (Restored)
     let mut concept_memory: Vec<(String, Array1<f32>)> = Vec::new();
@@ -174,6 +324,10 @@ async fn main() {
     let mut last_narrative = "".to_string();
     let mut is_sleeping = false;
     let mut current_memory_event: Option<Vec<f32>> = None;
+    
+    // Learning quality benchmarks
+    let mut metrics = LearningMetrics::new(concept_memory.len());
+    let benchmark_interval = 500; // Print benchmark every N steps
 
     loop {
         step += 1;
@@ -182,12 +336,10 @@ async fn main() {
         body.update(0.005, 0.0); // Constant decay, energy comes from DATA processing (simulated below)
         
         // --- B. Drive Update (Data Hunger) ---
-        // Hunger increases if we run out of tokens or haven't read in a while.
+        // Hunger increases if we run out of chunks or haven't read in a while.
         // Simplified: Hunger is inverse of Energy.
-        // Construct Novelty: If the current word is "rare" (high ID), it's novel.
-        let is_novel = if token_ptr < current_tokens.len() {
-             current_tokens[token_ptr] > 1000 // Rare words are > 1000
-        } else { false };
+        // Novelty: Later chunks in a book tend to have rarer concepts
+        let is_novel = chunk_ptr > preembedded.len() / 2; // Second half of book is "novel"
         let novelty = if is_novel { 0.8 } else { 0.1 };
         
         drives.update(body.energy, novelty);
@@ -361,26 +513,25 @@ async fn main() {
              Action::Skip => {
                  // --- SKIPPING (Foraging) ---
                  input_word = ">>".to_string();
-                 token_ptr += 10;
-                 if token_ptr >= current_tokens.len() { token_ptr = 0; } 
-                 body.energy = (body.energy - 0.002).max(0.0);
+                 chunk_ptr += 5; // Skip 5 chunks (~320 tokens)
+                 if chunk_ptr >= preembedded.len() { chunk_ptr = 0; } 
+                 body.energy = (body.energy - 0.01).max(0.0);
                  cortex.step(None);
              },
              
              Action::Read => {
-                 // --- READING ---
+                 // --- READING (BATCH MODE: 64 tokens per physics step) ---
                 // 1. Prediction
                 let cortical_out = cortex.get_cortical_output();
                 let out_vec = Array1::from(cortical_out);
                 let (predicted_token, _confidence) = embedder.decode_nearest(&out_vec);
                 prediction = predicted_token;
     
-                // 2. Read actual word
-                if token_ptr < current_tokens.len() {
-                    let token_id = current_tokens[token_ptr];
-                    input_word = embedder.decode(&[token_id]);
+                // 2. Read semantic chunk (64 tokens at once)
+                if chunk_ptr < preembedded.len() {
+                    let emb = &preembedded[chunk_ptr];
+                    input_word = format!("[chunk:{}]", chunk_ptr);
                     
-                    let emb = embedder.embed_token(token_id);
                     let emb_vec = emb.to_vec();
                     let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
                     let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
@@ -388,24 +539,26 @@ async fn main() {
                     let final_input = input_3d.add(bias_3d);
                     cortex.step(Some(final_input));
                     
-                    body.energy = (body.energy - 0.001).max(0.0); // 5x LONGER ATTENTION SPAN
-                    token_ptr += 1;
+                    // Energy cost scaled by window size (64 tokens worth)
+                    body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
+                    chunk_ptr += 1;
                 } else {
                     cortex.step(None);
                     input_word = "<END>".to_string();
-                    // Keep Hunger book-switching logic? Yes.
+                    // Book-switching: re-embed next book
                     if drives.hunger > 0.8 {
                         current_book_idx = (current_book_idx + 1) % books.len();
-                        current_tokens = embedder.tokenize(&books[current_book_idx]);
-                        token_ptr = 0;
-                        println!("--> Opening Book {}...", current_book_idx);
+                        let new_tokens = embedder.tokenize(&books[current_book_idx]);
+                        preembedded = embedder.preembed_corpus_parallel(&new_tokens, window_size);
+                        chunk_ptr = 0;
+                        println!("--> Opening Book {} ({} chunks)...", current_book_idx, preembedded.len());
                     }
                 }
              }
         }
         
-        // --- E. Readout ---
-        if step % 20 == 0 {
+        // --- E. Readout (every step is now meaningful - processing 64 tokens) ---
+        if step % 1 == 0 {
             let cortical_out = cortex.get_cortical_output();
 
             let energies = cortex.get_energy().to_data().to_vec::<f32>().unwrap();
@@ -440,16 +593,20 @@ async fn main() {
             // Self-Discovery / Association
             // If we have high energy (focus) but don't recognize the pattern (low score),
             // we should associate the *Current Input Word* with this Brain State.
-            // DEBUG: Print why we aren't learning
-            if best_score < 0.8 && sum_e > 0.5 && input_word.len() > 2 && input_word != "<unk>" {
-                 // println!("   [Learning] Score: {:.2}, SumE: {:.2}. Associating '{}'", best_score, sum_e, input_word);
+            // APPROACH 2: Lowered threshold from 0.8 to 0.3 for faster learning
+            if best_score < 0.3 && sum_e > 0.3 && input_word.len() > 2 && input_word != "<unk>" && !input_word.starts_with("[") {
                  concept_memory.push((input_word.clone(), output_arr.clone()));
+                 metrics.record_concept_learned();
                  // Update best_concept immediately for this step
                  best_concept = &concept_memory.last().unwrap().0;
                  best_score = 1.0; 
-            } else if input_word.len() > 2 {
-                 // println!("   [No Learn] Score: {:.2} (Concept: {}), SumE: {:.2}", best_score, best_concept, sum_e);
             }
+            
+            // Record learning metrics
+            metrics.record_concept(best_concept);
+            metrics.record_coherence(best_score, step);
+            metrics.record_energy(body.energy);
+            metrics.record_action(action == Action::Read);
 
             // --- EMBODIMENT LOOP (Refined) ---
             // 1. Concept-based Valence (Safety/Danger)
@@ -496,16 +653,10 @@ async fn main() {
             let narrative = interpreter.interpret(&concepts, confidence);
             last_narrative = narrative.clone();
 
-            println!("{:4} | {:<4.2}   | {:>+5.2} | {:<6} | {:<4.2} | {:<15} | {:<15} | {}", 
-                step, 
-                body.energy, 
-                body.pleasure_pain,
-                current_drive.unwrap_or("-".to_string()), 
-                confidence,
-                input_word.chars().take(15).collect::<String>(),
-                prediction.chars().take(15).collect::<String>(),
-                narrative
-            ); 
+            // Only print benchmark at regular intervals (reduces terminal clutter)
+            if step % benchmark_interval == 0 && step > 0 {
+                metrics.print_benchmark(step);
+            }
 
         }
         
