@@ -1,0 +1,2 @@
+    Checking bdh_model v0.1.0 (C:\repo\BRAIN_REPOS\BDH)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s

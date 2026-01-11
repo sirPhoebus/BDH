@@ -142,7 +142,7 @@ fn main() -> std::io::Result<()> {
         println!("  Embedding {} chunks to neuron space...", chunks.len().min(500));
         let seqs: Vec<Array2<f32>> = chunks.iter()
             .take(500)  // Limit for memory
-            .map(|chunk| embedder.embed_text_sparse(chunk, 0.1))
+            .map(|chunk| embedder.embed_text(chunk))
             .filter(|seq| seq.nrows() >= args.seq_len)
             .map(|seq| {
                 // Truncate to seq_len

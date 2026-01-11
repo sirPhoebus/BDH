@@ -1,4 +1,5 @@
 use ndarray::{Array1, Array2};
+use rayon::prelude::*;
 
 /// The "Inner Voice" of the brain.
 /// Interprets neural states into concepts by identifying synchronized Ensembles.
@@ -39,19 +40,33 @@ impl Interpreter {
         let mut ensembles: Vec<Vec<usize>> = Vec::new();
         let mut assigned = vec![false; n];
 
-        // 1. GROUP NEURONS INTO ENSEMBLES
-        for i in 0..n {
-            if assigned[i] || cortical_out[i] < 0.1 { continue; }
+        // 1. PRE-CALCULATE PHASORS FOR FAST SIMILARITY
+        // cos(a - b) = cos(a)cos(b) + sin(a)sin(b)
+        let cos_sin: Vec<(f32, f32)> = phases.iter().map(|&p| (p.cos(), p.sin())).collect();
+        
+        let mut active_indices: Vec<usize> = (0..n)
+            .filter(|&i| cortical_out[i] >= 0.1)
+            .collect();
+        
+        // Sort by activity descending to pick "seeds" for ensembles
+        active_indices.sort_by(|&a, &b| cortical_out[b].partial_cmp(&cortical_out[a]).unwrap());
+
+        for &i in &active_indices {
+            if assigned[i] { continue; }
             
             let mut current_ensemble = vec![i];
             assigned[i] = true;
+            let (ci, si) = cos_sin[i];
+            let threshold = 1.0 - self.phase_epsilon;
 
-            for j in (i + 1)..n {
-                if assigned[j] || cortical_out[j] < 0.1 { continue; }
+            for &j in &active_indices {
+                if assigned[j] { continue; }
 
-                // Check for Phase-Locking (Binding)
-                let phase_diff_cos = (phases[i] - phases[j]).cos();
-                if phase_diff_cos > (1.0 - self.phase_epsilon) {
+                // Vectorized-ready phase similarity
+                let (cj, sj) = cos_sin[j];
+                let phase_diff_cos = ci * cj + si * sj;
+                
+                if phase_diff_cos > threshold {
                     current_ensemble.push(j);
                     assigned[j] = true;
                 }
@@ -59,58 +74,53 @@ impl Interpreter {
             ensembles.push(current_ensemble);
         }
 
-        // 2. DECODE ENSEMBLES
-        let mut results = Vec::new();
+        // 2. DECODE ENSEMBLES IN PARALLEL
         let vocab_size = weights.nrows();
+        let mut results: Vec<(String, f32)> = ensembles.into_par_iter()
+            .filter_map(|ensemble| {
+                if ensemble.is_empty() { return None; }
 
-        for ensemble in ensembles {
-            // SPURIOUS FILTER: Mitigation for random phase alignment
-            // Relax to 1 to bootstrap learning, then increase back to 2 as population scales
-            if ensemble.len() < 1 { continue; }
+                let mut ensemble_vector = Array1::zeros(vocab_size);
+                let mut total_activity = 0.0;
 
-            // Aggregate the meaning of the ensemble
-            let mut ensemble_vector: Array1<f32> = Array1::zeros(vocab_size);
-            let mut total_activity = 0.0;
-
-            for &neuron_idx in &ensemble {
-                let activity = cortical_out[neuron_idx];
-                // Weight by novelty (inverse usage)
-                let novelty_weight = 1.0 / (1.0 + usage[neuron_idx]);
-                let weight = activity * novelty_weight;
-                
-                // The contribution of this neuron to all vocabulary directions
-                for v in 0..vocab_size {
-                    ensemble_vector[v] += weights[[v, neuron_idx]] * weight;
+                for &neuron_idx in &ensemble {
+                    let activity = cortical_out[neuron_idx];
+                    let novelty_weight = 1.0 / (1.0 + usage[neuron_idx]);
+                    let weight = activity * novelty_weight;
+                    
+                    // Vectorized update using ndarray
+                    ensemble_vector += &(&weights.column(neuron_idx) * weight);
+                    total_activity += weight;
                 }
-                total_activity += weight;
-            }
 
-            if total_activity > 0.0 {
-                // UNIT-SPHERE PROJECTION: Post-normalization of the centroid
-                // Find normalized direction to prevent "origin collapse" in high dimensions
-                let mut best_word_id = 0;
-                let mut max_sim = -1.0;
-                
-                // Normalize the ensemble vector for cosine comparison
-                let norm = ensemble_vector.mapv(|x| x * x).sum().sqrt().max(1e-9);
-                let normalized_vector = ensemble_vector / norm;
+                if total_activity > 0.0 {
+                    // Find normalized direction to prevent "origin collapse" in high dimensions
+                    let norm = ensemble_vector.dot(&ensemble_vector).sqrt().max(1e-9);
+                    let normalized_vector = ensemble_vector / norm;
 
-                for v in 0..vocab_size {
-                    // Sim is now a pure projection onto the unit sphere
-                    let sim = normalized_vector[v];
-                    if sim > max_sim {
-                        max_sim = sim;
-                        best_word_id = v;
+                    let mut best_word_id = 0;
+                    let mut max_sim = -1.0;
+
+                    for v in 0..vocab_size {
+                        let sim = normalized_vector[v];
+                        if sim > max_sim {
+                            max_sim = sim;
+                            best_word_id = v;
+                        }
                     }
-                }
 
-                let best_word = embedder.decode(&[best_word_id as u32]);
+                    let best_word = embedder.decode(&[best_word_id as u32]);
 
-                if best_word.len() > 3 && !best_word.starts_with("[") {
-                    results.push((best_word, total_activity));
+                    if best_word.len() > 3 && !best_word.starts_with("[") {
+                        Some((best_word, total_activity))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
 
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(self.top_k);

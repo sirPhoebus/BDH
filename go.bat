@@ -1,0 +1,1 @@
+call cargo run --bin central_sim

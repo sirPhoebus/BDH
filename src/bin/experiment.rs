@@ -2,7 +2,7 @@ use ndarray::prelude::*;
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use bdh_model::ChronosBdh;
-use rand::{thread_rng, Rng};
+use rand::thread_rng;
 
 fn main() {
     let n = 256;

@@ -1,6 +1,7 @@
 
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use rayon::prelude::*;
 
 /// Harmonic BDH model: GPU-accelerated implementation using Burn Tensors.
 /// 
@@ -282,35 +283,33 @@ impl<B: Backend> HarmonicBdhBurn<B> {
     pub fn hebbian_learn(&mut self, input: &[f32], learning_rate: f32) {
         if input.len() != self.n || learning_rate <= 0.0 { return; }
         
-        let output = self.get_cortical_output();
-        let usage_data = self.usage.to_data().to_vec::<f32>().unwrap();
+        let device = self.rho.device();
+        let input_tensor = Tensor::<B, 1>::from_floats(input, &device);
         
-        let mean_act = output.iter().sum::<f32>() / self.n as f32;
+        // Get cortical output as tensor: [Neurons]
+        let output = self.rho.clone()
+            .slice([0..1, 0..1, 0..self.n, 0..1])
+            .reshape([self.n]);
+        
+        let mean_act = output.clone().mean();
         let target_sparsity = 0.05; // Ideal % of active neurons
 
-        let mut next_freq = Vec::with_capacity(self.n);
-        let current_freq = self.natural_freq.to_data().to_vec::<f32>().unwrap();
+        // 1. Saturation: High usage = low learning (prevents narrow attractors)
+        // saturation = (usage_data[i] / target_sparsity).min(5.0);
+        let saturation = self.usage.clone().div_scalar(target_sparsity).clamp(0.0, 5.0);
+        // effective_lr = learning_rate / (1.0 + saturation);
+        let effective_lr = saturation.add_scalar(1.0).recip().mul_scalar(learning_rate);
 
-        for i in 0..self.n {
-            // 1. Saturation: High usage = low learning (prevents narrow attractors)
-            let saturation = (usage_data[i] / target_sparsity).min(5.0);
-            let effective_lr = learning_rate / (1.0 + saturation);
-
-            // 2. Correlation (Hebbian)
-            let correlation = input[i] * output[i];
-            
-            // 3. Anti-Hebbian: Subtract global average to decorrelate
-            let novelty_signal = correlation - (mean_act * output[i]);
-            
-            // 4. Update with Forgetting Leak
-            let delta_f = effective_lr * novelty_signal;
-            let nf = (current_freq[i] + delta_f) * 0.99999; // Tiny leak to stay stable
-            
-            next_freq.push(nf.clamp(0.01, 10.0));
-        }
-
-        let device = self.natural_freq.device();
-        self.natural_freq = Tensor::<B, 1>::from_floats(next_freq.as_slice(), &device);
+        // 2. Correlation (Hebbian)
+        let correlation = input_tensor.mul(output.clone());
+        
+        // 3. Anti-Hebbian: Subtract global average to decorrelate
+        // novelty_signal = correlation - (mean_act * output[i]);
+        let novelty_signal = correlation.sub(output.mul(mean_act.unsqueeze()));
+        
+        // 4. Update with Forgetting Leak
+        let delta_f = effective_lr.mul(novelty_signal);
+        self.natural_freq = self.natural_freq.clone().add(delta_f).mul_scalar(0.99999).clamp(0.01, 10.0);
     }
     
     pub fn get_usage_vec(&self) -> Vec<f32> {
@@ -370,11 +369,10 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         let real = self.rho.clone().slice([0..1, 0..1, 0..self.n, 0..1]).reshape([self.n]).to_data().to_vec::<f32>().unwrap();
         let imag = self.rho.clone().slice([0..1, 0..1, 0..self.n, 1..2]).reshape([self.n]).to_data().to_vec::<f32>().unwrap();
         
-        let mut phases = Vec::with_capacity(self.n);
-        for i in 0..self.n {
-            phases.push(imag[i].atan2(real[i]));
-        }
-        phases
+        real.into_par_iter()
+            .zip(imag)
+            .map(|(r, i)| i.atan2(r))
+            .collect()
     }
 
     /// Get normalized cortical output as an ndarray for similarity matching.

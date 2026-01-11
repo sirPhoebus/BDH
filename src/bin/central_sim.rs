@@ -22,10 +22,17 @@ use axum::{
     Router,
 };
 use tower_http::services::ServeDir;
+use burn::tensor::backend::Backend;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 
-const BENCHMARK_INTERVAL: usize = 10; // Lowered for faster verification
+const BENCHMARK_INTERVAL: usize = 10;
+const READOUT_INTERVAL: usize = 5; // Only sync GPU and interpret every 5 steps
+
+fn generate_concept_prototype<B: Backend>(text: &str, embedder: &bdh_model::data::Embedder, device: &B::Device) -> Tensor<B, 1> {
+    let emb = embedder.embed_text(text).row(0).to_owned();
+    Tensor::<B, 1>::from_floats(emb.to_vec().as_slice(), device)
+}
 
 /// Helper: Filter out low-quality concepts (Stopwords, suffixes, short tokens)
 fn is_useful_concept(word: &str) -> bool {
@@ -56,32 +63,8 @@ struct BrainStateUpdate {
     acetylcholine: f32,
     input_word: String,
     prediction: String,
-    inner_voice: String,
+    inner_voice: String,        // [NEW] Narrative thought
     memory_event: Option<Vec<f32>>,
-    working_memory: String, // [NEW] WM Content
-    mode: String,          // [NEW] Reading/Reflecting
-}
-
-// --- PERSISTENCE ---
-fn save_concepts(concepts: &Vec<(String, Array1<f32>)>) {
-    let plain_data: Vec<(String, Vec<f32>)> = concepts.iter()
-        .map(|(k, v)| (k.clone(), v.to_vec()))
-        .collect();
-    let json = serde_json::to_string(&plain_data).unwrap();
-    std::fs::write("concept_memory.json", json).unwrap_or_default();
-}
-
-fn load_concepts() -> Option<Vec<(String, Array1<f32>)>> {
-    if let Ok(content) = std::fs::read_to_string("concept_memory.json") {
-        if let Ok(plain_data) = serde_json::from_str::<Vec<(String, Vec<f32>)>>(&content) {
-            let loaded: Vec<(String, Array1<f32>)> = plain_data.iter()
-                .map(|(k, v)| (k.clone(), Array1::from(v.clone())))
-                .collect();
-            println!("   [Persistence] Loaded {} concepts from disk.", loaded.len());
-            return Some(loaded);
-        }
-    }
-    None
 }
 
 /// A simple episodic memory of a high-affect event.
@@ -149,6 +132,7 @@ struct LearningMetrics {
     memory_stores: usize,
 }
 
+#[allow(dead_code)]
 impl LearningMetrics {
     fn new(initial_concepts: usize) -> Self {
         Self {
@@ -361,35 +345,29 @@ async fn main() {
     
     // 6. Concept Memory (Restored)
     let mut concept_memory: Vec<(String, Array1<f32>)> = Vec::new();
-    
-    // PERSISTENCE: Try loading first
-    if let Some(loaded) = load_concepts() {
-        concept_memory = loaded;
-    } else {
-        // Fallback to defaults
-        let concepts_to_add = vec![
-            ("Safety", "safety calm secure protect"),
-            ("Danger", "danger pain threat hurt"),
-            ("Mystery", "mystery unknown puzzle hidden"),
-            ("Action", "action move fast run jump"),
-            ("Thought", "thought dream mind think logic"),
-            ("Machine", "machine metal gear clock electric"),
-            ("Life", "life grow organic leaf breath"),
-        ];
 
-        for (name, text) in concepts_to_add {
-            let vec = embedder.embed_text(text).row(0).to_owned();
-            concept_memory.push((name.to_string(), vec.to_vec().into()));
-        }
-    }
-    
     // 7. Hippocampal Memory (Hippocampus)
     println!("7. Memory: Initializing vector store...");
     let mut memory = MemorySystem::new(100);
     
     // 6b. Working Memory (Short-Term Context)
     println!("   Working Memory: Allocating 3 slots...");
-    let mut wm = WorkingMemory::<Backend>::new(3, 1.5); // Capacity 3, Bias Strength 1.5 (Strong driver)
+    let mut wm = WorkingMemory::<Backend>::new(3, 0.2); // Capacity 3, Bias Strength 0.2
+    // Semantic Grounding: Enrich vocabulary of thoughts
+    let concepts_to_add = vec![
+        ("Safety", "safety calm secure protect"),
+        ("Danger", "danger pain threat hurt"),
+        ("Mystery", "mystery unknown puzzle hidden"),
+        ("Action", "action move fast run jump"),
+        ("Thought", "thought dream mind think logic"),
+        ("Machine", "machine metal gear clock electric"),
+        ("Life", "life grow organic leaf breath"),
+    ];
+
+    for (name, text) in concepts_to_add {
+        let vec = embedder.embed_text(text).row(0).to_owned();
+        concept_memory.push((name.to_string(), vec.to_vec().into()));
+    }
     
     println!("\nSIMULATION STARTING. Reading: Book 0\n");
     /*
@@ -402,28 +380,38 @@ async fn main() {
     // 7. Goal Vectors (Drive Targets)
     // We create "Attractors" for drives.
     // "Food" for Hunger. "Mystery" for Curiosity.
-    let food_vec = embedder.embed_text("food eat delicious satisfy").row(0).to_owned();
-    let novelty_vec = embedder.embed_text("mystery strange new discover").row(0).to_owned();
-    let food_vec = Tensor::<Backend, 1>::from_floats(food_vec.to_vec().as_slice(), &device);
-    let novelty_vec = Tensor::<Backend, 1>::from_floats(novelty_vec.to_vec().as_slice(), &device);
+    let food_vec_tensor = generate_concept_prototype::<Backend>("food eat delicious satisfy", &embedder, &device);
+    let novelty_vec_tensor = generate_concept_prototype::<Backend>("mystery strange new discover", &embedder, &device);
+    let _social_vec_tensor = generate_concept_prototype::<Backend>("social connect bond group", &embedder, &device);
 
+    let food_arr = Array1::from_vec(food_vec_tensor.clone().into_data().iter::<f32>().collect());
+    let novelty_arr = Array1::from_vec(novelty_vec_tensor.clone().into_data().iter::<f32>().collect());
+
+    println!("\n[!] STARTING SIMULATION (Optimization: GPU Sync every {} steps)", READOUT_INTERVAL);
     let mut last_narrative = String::new();
     let mut current_memory_event: Option<Vec<f32>> = None;
     let mut current_stimulus: Option<Array1<f32>> = None; 
     let mut current_word: Option<String> = None;
     let mut is_sleeping = false;
     
-    // Learning quality benchmarks
     let mut metrics = LearningMetrics::new(concept_memory.len());
+    let mut last_step_time = std::time::Instant::now();
 
-    // Reflection State
-    let mut is_reflecting = false;
-    let mut reflection_timer = 0;
-    const READING_PHASE_LEN: usize = 200;
-    const REFLECTION_PHASE_LEN: usize = 50;
+    // CACHED STATE (Minimize GPU/CPU Sync)
+    let mut cached_cortical_out = Array1::zeros(n_neurons);
+    let mut cached_energies = vec![0.0; layers];
+    let mut _cached_phases = vec![0.0; n_neurons];
+    let mut _cached_usage = vec![0.0; n_neurons];
 
     loop {
         step += 1;
+        let is_readout_step = step % READOUT_INTERVAL == 0;
+        
+        if step % 100 == 0 {
+            let elapsed = last_step_time.elapsed();
+            println!("   [Perf] Last 100 steps took: {:?} ({:?} per step)", elapsed, elapsed / 100);
+            last_step_time = std::time::Instant::now();
+        }
         
         // --- A. Body Update (Metabolism) ---
         body.update(0.005, 0.0); // Constant decay, energy comes from DATA processing (simulated below)
@@ -459,62 +447,39 @@ async fn main() {
         
         // Drive Modulation (shifts targets, physics handled by chemicals now)
         let _modulation = drives.get_modulation();
-        // We override damping from neurochem if drive is strong?
-        // Let's let Neurochem be the final arbiter of physics.
         
-        // Calculate Bias Tensor here to be available for both Reading and Dreaming (if needed)
+        // --- D. Agency / Action Selection (Homeostatic + Conflict) ---
+        
         // 2. Drive Goal Injection (Bias)
-        // Instead of just damping, we inject a "Wanting" vector.
         let mut bias_input: Option<Tensor<Backend, 1>> = None;
-        
         match current_drive.as_deref() {
-            Some("HUNGER") => {
-                 bias_input = Some(food_vec.clone());
-            },
-            Some("CURIOSITY") => {
-                 bias_input = Some(novelty_vec.clone());
-            },
+            Some("HUNGER") => bias_input = Some(food_vec_tensor.clone()),
+            Some("CURIOSITY") => bias_input = Some(novelty_vec_tensor.clone()),
             _ => {},
         }
         
-        // Prepare final bias tensor (Goal + Echo)
-        // Echo: Feed back last narrative weakly
         let mut total_bias_vec = if let Some(ref b) = bias_input {
-             b.clone().mul_scalar(0.2) // Weak goal
+             b.clone().mul_scalar(0.2) // Weak collective goal
         } else {
              Tensor::<Backend, 1>::zeros([n_neurons], &device)
         };
 
         // Echo Loop (Working Memory)
-        // Every step, we hear a faint echo of our last thought.
-        if !last_narrative.is_empty() && step % 5 == 0 {
+        if !last_narrative.is_empty() && step % 10 == 0 {
              let echo_vec = interpreter.reflect(&last_narrative, &embedder);
              let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
-             total_bias_vec = total_bias_vec.add(echo_tensor.mul_scalar(0.1)); // Very weak echo
+             total_bias_vec = total_bias_vec.add(echo_tensor.mul_scalar(0.1)); 
         }
 
-        // Add Working Memory Context Bias
         let wm_bias = wm.get_context_bias(n_neurons, &device);
         total_bias_vec = total_bias_vec.add(wm_bias);
-
-        // Expand Bias for Addition
         let bias_3d = total_bias_vec.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
 
-
-        // --- D. Agency / Action Selection (Homeostatic + Conflict) ---
-        
-        // 1. Perception/Appraisal
-        // Check alignment with Drives (Foraging)
-        let cortical_out = cortex.get_cortical_output();
-        let state_vec = Array1::from(cortical_out.clone());
-        let goal_match = if let Some(ref goal) = bias_input {
-             // Approximate dot product with Goal Vector
-             // (Assuming normalized vectors, this is cosine sim)
-             let goal_vec: Vec<f32> = goal.clone().into_data().iter::<f32>().collect();
-             let goal_arr = Array1::from_vec(goal_vec);
-             state_vec.dot(&goal_arr)
-        } else {
-             0.0 
+        // 3. Perception/Appraisal
+        let goal_match = match current_drive.as_deref() {
+            Some("HUNGER") => cached_cortical_out.dot(&food_arr),
+            Some("CURIOSITY") => cached_cortical_out.dot(&novelty_arr),
+            _ => 0.0
         };
 
         #[derive(PartialEq, Clone, Copy)]
@@ -534,32 +499,15 @@ async fn main() {
         }
 
         // 2. Policy (Homeostatic + Conflict Resolution)
-        // Reflection Timer Logic
-        if is_reflecting {
-             reflection_timer += 1;
-             if reflection_timer > REFLECTION_PHASE_LEN {
-                 is_reflecting = false;
-                 reflection_timer = 0;
-                 // println!("   [State] Resume Reading (World Input Active)");
-             }
-        } else {
-             reflection_timer += 1;
-             if reflection_timer > READING_PHASE_LEN {
-                 is_reflecting = true;
-                 reflection_timer = 0;
-                 // println!("   [State] Entering Reflection (Inner Monologue...)");
-             }
-        }
-
         let action = if is_sleeping {
              Action::Dream
-        } else if is_reflecting {
-             Action::Reflect // Override other drives during Reflection Phase
         } else if body.chemicals.norepinephrine > 0.9 {
              Action::Skip 
         } else if drives.hunger > 0.85 && goal_match < 0.2 {
              // FORAGING MODE
              Action::Skip 
+        } else if drives.curiosity > 0.8 && step % 50 == 0 {
+             Action::Reflect
         } else {
              Action::Read
         };
@@ -569,7 +517,6 @@ async fn main() {
         
         // Initialize loop variables
         let mut surprise = 0.0;
-        let mut learning_rate_modulation = 1.0;
         
         match action {
              Action::Dream => {
@@ -584,21 +531,22 @@ async fn main() {
                          input_word = format!("*{}*", mem.concept);
                          current_stimulus = Some(mem.embedding.clone());
                          
-                         // LOOSE ASSOCIATION: Apply past bias during dreaming
-                         memory.recall_threshold = 0.55; 
-                         if let Some(past_freqs) = memory.recall(&mem.embedding) {
-                             let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
-                             let current_arr = Array1::from(current_freqs);
-                             let blended: Array1<f32> = (&current_arr * 0.9) + (&past_freqs * 0.1);
-                             cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
-                             metrics.record_memory_recall();
+                         // LOOSE ASSOCIATION (Only if readout)
+                         if is_readout_step {
+                             memory.recall_threshold = 0.55; 
+                             if let Some(past_freqs) = memory.recall(&mem.embedding) {
+                                  // This is still a sync point if we set freqs, but it's now once every 5-10 steps
+                                  let current_arr = Array1::from(cortex.get_usage_vec()); 
+                                  let blended = (&current_arr * 0.9) + (&past_freqs * 0.1);
+                                  cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
+                                  metrics.record_memory_recall();
+                             }
                          }
 
                          Tensor::<Backend, 1>::from_floats(mem.embedding.to_vec().as_slice(), &device)
                     } else {
                         // Fallback to Chaining
-                        let output_arr = Array1::from(cortex.get_cortical_output());
-                        let (next_token, _) = embedder.decode_nearest(&output_arr);
+                        let (next_token, _) = embedder.decode_nearest(&cached_cortical_out);
                         input_word = format!("~{}~", next_token);
                         
                         let self_talk = format!("I imagine {}", next_token);
@@ -608,8 +556,7 @@ async fn main() {
                     }
                 } else {
                     // Standard Associative Chaining
-                    let output_arr = Array1::from(cortex.get_cortical_output());
-                    let (mut next_token, _) = embedder.decode_nearest(&output_arr);
+                    let (mut next_token, _) = embedder.decode_nearest(&cached_cortical_out);
                     
                     // Anti-Loop: If word is "imagine" or too frequent, inject a random concept
                     if next_token == "imagine" || next_token == "Safety" || next_token == "t" {
@@ -632,49 +579,27 @@ async fn main() {
                 body.energy = (body.energy + 0.1).min(1.0); // FASTER RECOVERY
              },
              
-             Action::Reflect => {
-                 // --- REFLECTION (INNER MONOLOGUE) ---
-                 // Sensory Deprivation: No external input. Purely driven by WM Bias (added earlier).
-                 current_stimulus = None;
-                 input_word = "   [Reflecting...]".to_string();
-                 
-                 // 1. Process Thinking Step (Zero Input + WM Bias)
-                 // We need to pass a Zero Tensor + Bias.
-                 // We already added bias to total_bias_vec.
-                 // So we just need to pass a Zero Input Tensor.
-                 let zero_input = Tensor::<Backend, 1>::zeros([n_neurons], &device)
-                         .reshape([1, 1, n_neurons])
-                         .expand([layers, d, n_neurons]);
-                 
-                 // Add bias
-                 let final_input = zero_input.add(bias_3d);
-                 
-                 cortex.step(Some(final_input));
-                 
-                 // 2. Decode Thought
-                 let cortical_out = cortex.get_cortical_output();
-                 let out_vec = Array1::from(cortical_out.clone());
-                 let (thought_token, confidence) = embedder.decode_nearest(&out_vec);
-                 
-                 prediction = format!("(Thought: {})", thought_token);
-                 
-                 // SILENT MODE: Only print via Probe.json
-                 if is_useful_concept(&thought_token) {
-                      if confidence > 0.25 {
-                          // println!("   [Inner Monologue] '{}' ({:.2})", thought_token, confidence);
-                          // FEEDBACK: Thinking about it makes it stronger in WM
-                          let thought_tensor = Tensor::<Backend, 1>::from_floats(out_vec.as_slice().unwrap(), &device);
-                          wm.update(thought_token, thought_tensor);
-                          
-                          // PERSISTENCE: Opportunistic Save
-                          if step % 200 == 0 {
-                              save_concepts(&concept_memory);
-                          }
-                      }
-                 }
-             },
+              Action::Reflect => {
+                 // --- REFLECTION ---
+                 if !last_narrative.is_empty() {
+                       input_word = "self".to_string();
+                       let echo_vec = interpreter.reflect(&last_narrative, &embedder);
+                       let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
+                        let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
+                        current_stimulus = Some(echo_vec);
+                        cortex.step(Some(input_3d));
+
+                        // DREAM CONSOLIDATION: Periodic Synaptic Scaling
+                        if step % 500 == 0 {
+                             cortex.consolidate_synapses();
+                             // println!("   [Dream] Synaptic Scaling: Consolidating learned patterns...");
+                        }
+                  } else {
+                      cortex.step(None); 
+                  }
+              },
               
-              Action::Skip => {
+               Action::Skip => {
                   // --- SKIPPING (Foraging) ---
                   input_word = ">>".to_string();
                   chunk_ptr += 5; // Skip 5 chunks (~320 tokens)
@@ -685,11 +610,9 @@ async fn main() {
               },
               
              Action::Read => {
-                 // --- READING (BATCH MODE: 64 tokens per physics step) ---
-                 // 1. Prediction for display
-                 let cortical_out = cortex.get_cortical_output();
-                 let out_vec = Array1::from(cortical_out);
-                 let (predicted_token, _confidence) = embedder.decode_nearest(&out_vec);
+                 // --- READING ---
+                 // Use cached prediction for display
+                 let (predicted_token, _confidence) = embedder.decode_nearest(&cached_cortical_out);
                  prediction = predicted_token;
      
                  if chunk_ptr < preembedded.len() {
@@ -698,19 +621,18 @@ async fn main() {
                      current_word = Some(chunk.label.clone());
                      input_word = format!("[chunk:{}]", chunk_ptr);
                      
-                     // MEMORY RECALL
-                     memory.recall_threshold = 0.65;
-                     if let Some(past_freqs) = memory.recall(&chunk.vector) {
-                         let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
-                         let current_arr = Array1::from(current_freqs);
-                         let blended: Array1<f32> = (&current_arr * 0.9) + (&past_freqs * 0.1);
-                         cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
-                         metrics.record_memory_recall();
-                     }
+                      // MEMORY RECALL (Only if readout)
+                      if is_readout_step {
+                          memory.recall_threshold = 0.65;
+                          if let Some(_past_freqs) = memory.recall(&chunk.vector) {
+                              // Skipping expensive frequency sync/blend during high-speed reading
+                              // metrics.record_memory_recall();
+                          }
+                      }
  
                      // --- PREDICTIVE CODING: ERROR SIGNAL ---
                      surprise = 0.0;
-                     learning_rate_modulation = 1.0;
+                     let mut learning_rate_modulation = 1.0;
                      let array_emb = &chunk.vector;
                      
                      if let Some(last_pred) = &last_prediction {
@@ -737,12 +659,13 @@ async fn main() {
      
                      // Hebbian Learning
                      let base_lr = 0.01;
-                     // Only learn during Read action here
                      cortex.hebbian_learn(array_emb.as_slice().unwrap(), base_lr * learning_rate_modulation);
                      
-                     // Update Prediction
-                     let current_out = cortex.get_cortical_output_norm().unwrap_or(Array1::zeros(n_neurons));
-                     last_prediction = Some(current_out);
+                      // Update Prediction (Only if readout)
+                      if is_readout_step {
+                          let current_out = cortex.get_cortical_output_norm().unwrap_or(Array1::zeros(n_neurons));
+                          last_prediction = Some(current_out);
+                      }
                      
                      body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
                      chunk_ptr += 1;
@@ -763,7 +686,7 @@ async fn main() {
                                  current_book_idx = book_idx;
                              }
                          }
-                         Err(e) => {
+                         Err(_e) => {
                              chunk_ptr = 0; // Loop if fail
                          }
                      }
@@ -771,14 +694,22 @@ async fn main() {
               }
         }
         
-        // --- E. Readout (every step is now meaningful - processing 64 tokens) ---
-        if step % 1 == 0 {
+        // --- E. Readout (Only every READOUT_INTERVAL steps to prevent GPU-CPU sync bottlenecks) ---
+        if is_readout_step {
             let cortical_out = cortex.get_cortical_output();
+            cached_cortical_out = Array1::from(cortical_out.clone());
 
             let energies = cortex.get_energy().to_data().to_vec::<f32>().unwrap();
+            cached_energies = energies.clone();
+            let sum_e: f32 = energies.iter().sum();
+            
+            let phases = cortex.get_phases();
+            _cached_phases = phases.clone();
+            
+            let usage = cortex.get_usage_vec();
+            _cached_usage = usage.clone();
             
             // Confidence (Entropy)
-            let sum_e: f32 = energies.iter().sum();
             let entropy = if sum_e > 0.001 {
                 energies.iter().map(|e| {
                     let p = e / sum_e;
@@ -798,8 +729,6 @@ async fn main() {
             };
             interpreter.phase_epsilon = dynamic_epsilon;
 
-            let phases = cortex.get_phases();
-            let usage = cortex.get_usage_vec();
             let ensemble_concepts = interpreter.interpret_ensemble(
                 &cortical_out, 
                 &phases, 
@@ -845,19 +774,16 @@ async fn main() {
                 }
                 
                 // Debug why learning stops
-                // Debug why learning stops
                 if step % 200 == 0 {
-                    // SILENT MODE
-                    // println!("   [Debug] Step {}: Best Match '{}' ({:.4})", step, best_concept, best_score);
-                    // println!("   [WM] Context: {}", wm.debug_string());
+                    println!("   [Debug] Step {}: Best Match '{}' ({:.4})", step, best_concept, best_score);
+                    println!("   [WM] Context: {}", wm.debug_string());
                 }
 
                 // If still unrecognized, associate the current *Input Stimulus* word as a NEW concept
                 if let Some(word_str) = &current_word {
                     // QUALITY CONTROL: Filter using our helper (Stopwords, Suffixes, Length)
                     if best_score < 0.5 && sum_e > 0.01 && is_useful_concept(word_str) && word_str != "<unk>" {
-                         // SILENT MODE
-                         // println!("   [!] LEARNED NEW CONCEPT: '{}' (E={:.4}, Score={:.4})", word_str, sum_e, best_score);
+                         println!("   [!] LEARNED NEW CONCEPT: '{}' (E={:.4}, Score={:.4})", word_str, sum_e, best_score);
                          concept_memory.push((word_str.clone(), output_arr));
                          metrics.record_concept_learned(word_str.as_str(), step);
                          best_concept = word_str.clone();
@@ -972,7 +898,7 @@ async fn main() {
                     "cortical_energy": {:.4}
                 }}"#,
                 step,
-                cortex.get_phases().iter().map(|p| p.sin()).sum::<f32>().abs() / n_neurons as f32, // Simplified coherence
+                _cached_phases.iter().map(|p| p.sin()).sum::<f32>().abs() / n_neurons as f32, // Simplified coherence
                 metrics.concept_diversity(),
                 metrics.concepts_now,
                 body.energy,
@@ -985,11 +911,6 @@ async fn main() {
                 surprise,
                 sum_e
             ));
-            
-                // PERSISTENCE (Guaranteed Save every 500 steps)
-                if step % 500 == 0 {
-                    save_concepts(&concept_memory);
-                }
             }
 
         }
@@ -997,9 +918,8 @@ async fn main() {
         
 
             // --- BROADCAST STATE (for 3D viz) ---
-            // Throttled to prevent saturating websocket at high speeds
             if step % 10 == 0 {
-                let current_energies = cortex.get_neuron_energies(); 
+                let current_energies = cached_energies.clone(); 
                 let update = BrainStateUpdate {
                     energies: current_energies,
                     dopamine: body.chemicals.dopamine,
@@ -1007,12 +927,8 @@ async fn main() {
                     acetylcholine: body.chemicals.acetylcholine,
                     input_word: input_word.clone(),
                     prediction: prediction.clone(),
-                    inner_voice: prediction.clone(), // Use prediction as inner voice too
+                    inner_voice: last_narrative.clone(), // Broadcast narrative
                     memory_event: current_memory_event,
-                    
-                    // NEW FIELDS for Silent Observability
-                    working_memory: wm.debug_string(),
-                    mode: if is_reflecting { "Reflecting".to_string() } else { "Reading".to_string() },
                 };
                 let _ = tx_shared.send(update);
                 current_memory_event = None; // Clear after broadcast
