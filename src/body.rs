@@ -81,10 +81,9 @@ impl BodyState {
         // 4. Update Neuromodulators (The Chemical Substrate)
         
         // Dopamine (DA): Reward Prediction Error proxy. 
-        // If Valence > Expected (0), DA spikes.
-        // DA decays naturally.
-        let reward_signal = self.pleasure_pain.max(0.0);
-        self.chemicals.dopamine = 0.9 * self.chemicals.dopamine + 0.1 * reward_signal;
+        // We add a tiny baseline of 0.05 so it's rarely pure zero in the visualizer
+        let reward_signal = (self.pleasure_pain + 0.05).max(0.0);
+        self.chemicals.dopamine = 0.7 * self.chemicals.dopamine + 0.3 * reward_signal;
         
         // Norepinephrine (NE): Acute Arousal / Shock.
         // Responds to stress (pain) or high intensity.

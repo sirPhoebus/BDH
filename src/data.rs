@@ -241,6 +241,14 @@ impl Embedder {
         let token = self.tokenizer.decode(&[best_id as u32], false).unwrap_or("<err>".to_string());
         (token, best_sim)
     }
+
+    /// Get a random token from the vocabulary.
+    pub fn get_random_token(&self) -> (String, u32) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let id = rng.gen_range(0..self.vocab_size as u32);
+        (self.decode(&[id]), id)
+    }
 }
 
 /// Data acquisition: download Project Gutenberg texts.

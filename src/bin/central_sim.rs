@@ -7,8 +7,28 @@ use burn::tensor::Tensor;
 use std::time::Duration;
 use std::thread;
 use ndarray::Array1;
-
 use std::collections::VecDeque;
+use serde::Serialize;
+use axum::{
+    routing::get,
+    response::IntoResponse,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    Router,
+};
+use tower_http::services::ServeDir;
+use tokio::sync::broadcast;
+use std::sync::Arc;
+
+#[derive(Serialize, Clone)]
+struct BrainStateUpdate {
+    energies: Vec<f32>,
+    dopamine: f32,
+    norepinephrine: f32,
+    acetylcholine: f32,
+    input_word: String,
+    prediction: String,
+    memory_event: Option<Vec<f32>>, // [NEW] Broadcast the embedding of a saved memory
+}
 
 /// A simple episodic memory of a high-affect event.
 #[derive(Clone)]
@@ -47,9 +67,26 @@ impl EpisodicBuffer {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Initializing CENTRAL SIM (Grand Unification)...");
     
+    // 0. Setup Networking
+    let (tx, _rx) = broadcast::channel::<BrainStateUpdate>(16);
+    let tx_shared = Arc::new(tx);
+    
+    let app_tx = tx_shared.clone();
+    let app = Router::new()
+        .route("/ws", get(move |ws| ws_handler(ws, app_tx)))
+        .fallback_service(ServeDir::new("viz"));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    println!("   Visualizer server running at http://localhost:3000");
+    
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
     // 1. Setup GPU Backend
     type Backend = Wgpu<f32, i32>;
     let device = WgpuDevice::BestAvailable;
@@ -103,14 +140,21 @@ fn main() {
     // 6. Concept Memory (Restored)
     let mut concept_memory: Vec<(String, Array1<f32>)> = Vec::new();
     
-    // Semantic Grounding: Use the Embedder to find real vectors for concepts
-    let safety_vec = embedder.embed_text("safety calm secure protect").row(0).to_owned();
-    let danger_vec = embedder.embed_text("danger pain threat hurt").row(0).to_owned();
-    
-    // Normalize? Embedder output is usually not normalized.
-    // Let's assume using them raw is fine for dot product scoring if consistent.
-    concept_memory.push(("Safety".to_string(), safety_vec.to_vec().into()));
-    concept_memory.push(("Danger".to_string(), danger_vec.to_vec().into()));
+    // Semantic Grounding: Enrich vocabulary of thoughts
+    let concepts_to_add = vec![
+        ("Safety", "safety calm secure protect"),
+        ("Danger", "danger pain threat hurt"),
+        ("Mystery", "mystery unknown puzzle hidden"),
+        ("Action", "action move fast run jump"),
+        ("Thought", "thought dream mind think logic"),
+        ("Machine", "machine metal gear clock electric"),
+        ("Life", "life grow organic leaf breath"),
+    ];
+
+    for (name, text) in concepts_to_add {
+        let vec = embedder.embed_text(text).row(0).to_owned();
+        concept_memory.push((name.to_string(), vec.to_vec().into()));
+    }
     
     println!("\nSIMULATION STARTING. Reading: Book 0\n");
     println!("Step | Energy | Valnc | Drive  | Conf | Input Word      | Prediction      | Inner Voice");
@@ -127,6 +171,8 @@ fn main() {
     let novelty_vec = Tensor::<Backend, 1>::from_floats(novelty_vec.to_vec().as_slice(), &device);
 
     let mut last_narrative = "".to_string();
+    let mut is_sleeping = false;
+    let mut current_memory_event: Option<Vec<f32>> = None;
 
     loop {
         step += 1;
@@ -218,6 +264,7 @@ fn main() {
              0.0 
         };
 
+        #[derive(PartialEq, Clone, Copy)]
         enum Action {
             Read,
             Skip,      
@@ -225,21 +272,23 @@ fn main() {
             Dream,     
         }
 
+        // Hysteresis Logic for Sleep/Wake
+        // We use the 'is_sleeping' flag to stay asleep until recharged
+        if body.energy < 0.35 {
+             is_sleeping = true;
+        } else if body.energy > 0.85 {
+             is_sleeping = false;
+        }
+
         // 2. Policy (Homeostatic + Conflict Resolution)
-        let action = if body.chemicals.acetylcholine < 0.6 {
+        let action = if is_sleeping {
              Action::Dream
-        } else if body.chemicals.norepinephrine > 0.8 {
-             Action::Skip // Panic/Overwhelmed
-        } else if drives.hunger > 0.7 && goal_match < 0.2 {
-             // FORAGING MODE: Hungry but current context isn't satisfying.
-             // Conflict: If Curiosity is also high, do we stay?
-             // If Novelty is High, we might stay even if hungry (Exploration).
-             if drives.curiosity > 0.7 && novelty > 0.5 {
-                 Action::Read // Stay for novelty (Curiosity > Hunger locally)
-             } else {
-                 Action::Skip // Move on (Hunger > Curiosity)
-             }
-        } else if drives.curiosity > 0.7 && step % 40 == 0 {
+        } else if body.chemicals.norepinephrine > 0.9 {
+             Action::Skip 
+        } else if drives.hunger > 0.85 && goal_match < 0.2 {
+             // FORAGING MODE
+             Action::Skip 
+        } else if drives.curiosity > 0.8 && step % 50 == 0 {
              Action::Reflect
         } else {
              Action::Read
@@ -253,18 +302,17 @@ fn main() {
                 // --- DREAMING (Episodic Replay + Chaining) ---
                 prediction = "(Internal)".to_string();
                 
-                // Chance to replay a memory (Reminiscence)
-                let replay_trigger = rand::random::<f32>() < 0.15; // 15% chance per step
+                // Higher chance for a memory if we are stuck
+                let replay_trigger = rand::random::<f32>() < 0.3; // 30% jump chance
                 
                 let input_tensor = if replay_trigger {
                     if let Some(mem) = episodic_buffer.sample() {
-                         input_word = format!("*{}*", mem.concept); // *Mem*
-                         // Re-inject memory state
+                         input_word = format!("*{}*", mem.concept);
                          Tensor::<Backend, 1>::from_floats(mem.embedding.to_vec().as_slice(), &device)
                     } else {
-                        // Fallback to Chaining if buffer empty
+                        // Fallback to Chaining
                         let output_arr = Array1::from(cortex.get_cortical_output());
-                        let (next_token, _confidence) = embedder.decode_nearest(&output_arr);
+                        let (next_token, _) = embedder.decode_nearest(&output_arr);
                         input_word = format!("~{}~", next_token);
                         
                         let self_talk = format!("I imagine {}", next_token);
@@ -274,11 +322,16 @@ fn main() {
                 } else {
                     // Standard Associative Chaining
                     let output_arr = Array1::from(cortex.get_cortical_output());
-                    let (next_token, _confidence) = embedder.decode_nearest(&output_arr);
-                    input_word = format!("~{}~", next_token);
+                    let (mut next_token, _) = embedder.decode_nearest(&output_arr);
                     
-                    // Feedback Loop
-                    let self_talk = format!("I imagine {}", next_token);
+                    // Anti-Loop: If word is "imagine" or too frequent, inject a random concept
+                    if next_token == "imagine" || next_token == "Safety" || next_token == "t" {
+                         let (rand_token, _) = embedder.get_random_token();
+                         next_token = rand_token;
+                    }
+
+                    input_word = format!("~{}~", next_token);
+                    let self_talk = format!("I feel {}", next_token);
                     let feedback_vector = interpreter.reflect(&self_talk, &embedder);
                     Tensor::<Backend, 1>::from_floats(feedback_vector.to_vec().as_slice(), &device)
                 };
@@ -287,13 +340,12 @@ fn main() {
                 let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                 cortex.step(Some(input_3d));
                 
-                // Dreaming recovers Energy
-                body.energy = (body.energy + 0.01).min(1.0);
+                // Dreaming recovers Energy significantly to break the fast-cycle flutter
+                body.energy = (body.energy + 0.1).min(1.0); // FASTER RECOVERY
              },
              
              Action::Reflect => {
                  // --- REFLECTION ---
-                 prediction = "(Reflecting)".to_string();
                  if !last_narrative.is_empty() {
                       input_word = "self".to_string();
                       let echo_vec = interpreter.reflect(&last_narrative, &embedder);
@@ -335,7 +387,7 @@ fn main() {
                     let final_input = input_3d.add(bias_3d);
                     cortex.step(Some(final_input));
                     
-                    body.energy = (body.energy - 0.005).max(0.0);
+                    body.energy = (body.energy - 0.001).max(0.0); // 5x LONGER ATTENTION SPAN
                     token_ptr += 1;
                 } else {
                     cortex.step(None);
@@ -412,21 +464,29 @@ fn main() {
             env_valence += epistemic_reward;
             
             // 3. Goal Alignment (if Hunger, finding Food = Reward)
-            // (Simplified: If we output "Hunger" drive related words?)
             // Just use simple "Novelty Reward" for now if Curiosity is high
-            if drives.curiosity > 0.6 && input_word != "<unk>" {
-                 env_valence += 0.05;
+            if drives.curiosity > 0.6 && input_word != "<unk>" && action == Action::Read {
+                 env_valence += 0.3; // BOOSTED
+            }
+
+            // 4. Intrinsic Reward (Dreaming/Chaining)
+            if action == Action::Dream {
+                 env_valence += 0.1; // BOOSTED
+                 // Bonus if we actually recalled a memory (Look for '*' markers)
+                 if input_word.contains('*') {
+                     env_valence += 0.4; // RECALL BONUS
+                 }
             }
 
             if env_valence != 0.0 {
-                body.update(0.1, env_valence);
+                 body.update(0.1, env_valence);
             }
             
             // --- MEMORY ENCODING ---
-            // Significant events are stored in Episodic Buffer
             if body.pleasure_pain.abs() > 0.5 || body.arousal > 0.8 {
                  let cortical_out = cortex.get_cortical_output();
                  let state_vec = Array1::from(cortical_out);
+                 current_memory_event = Some(state_vec.to_vec());
                  episodic_buffer.add(state_vec, best_concept.to_string(), body.pleasure_pain);
             }
             // -----------------------
@@ -449,12 +509,44 @@ fn main() {
         }
         
         
+
+            // --- BROADCAST STATE (for 3D viz) ---
+            // Throttled to prevent saturating websocket at high speeds
+            if step % 10 == 0 {
+                let current_energies = cortex.get_neuron_energies(); 
+                let update = BrainStateUpdate {
+                    energies: current_energies,
+                    dopamine: body.chemicals.dopamine,
+                    norepinephrine: body.chemicals.norepinephrine,
+                    acetylcholine: body.chemicals.acetylcholine,
+                    input_word: input_word.clone(),
+                    prediction: prediction.clone(),
+                    memory_event: current_memory_event,
+                };
+                let _ = tx_shared.send(update);
+                current_memory_event = None; // Clear after broadcast
+            }
+
         // Auto-Save
         if step % 100 == 0 {
              let _ = cortex.save_state("brain.state");
         }
 
-        // Read speed
-        thread::sleep(Duration::from_millis(10));
+        // Read speed - REMOVED SLEEP FOR OVERCLOCKING
+        // thread::sleep(Duration::from_millis(10));
+    }
+}
+
+async fn ws_handler(ws: WebSocketUpgrade, tx: Arc<broadcast::Sender<BrainStateUpdate>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, tx))
+}
+
+async fn handle_socket(mut socket: WebSocket, tx: Arc<broadcast::Sender<BrainStateUpdate>>) {
+    let mut rx = tx.subscribe();
+    while let Ok(update) = rx.recv().await {
+        let msg = serde_json::to_string(&update).unwrap();
+        if socket.send(Message::Text(msg.into())).await.is_err() {
+            break;
+        }
     }
 }

@@ -256,13 +256,18 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         let i2 = imag.powf_scalar(2.0);
         let mag2 = r2.add(i2); // [Layers, Modes, Neurons]
         
-        // Sum over neurons and modes to get layer total
-        // sum_dim keeps dim. 
-        // [Layers, Modes, Neurons] -> sum(2) -> [Layers, Modes, 1]
-        // -> sum(1) -> [Layers, 1, 1]
-        // -> squeeze(2) -> [Layers, 1]
-        // -> squeeze(1) -> [Layers]
         mag2.sum_dim(2).sum_dim(1).squeeze::<2>(2).squeeze::<1>(1)
+    }
+
+    /// Get energies of individual neurons (Fundamental Layer, Fundamental Mode).
+    /// Returns Vec<f32> of size N.
+    pub fn get_neuron_energies(&self) -> Vec<f32> {
+        // Take Layer 0, Mode 0
+        let real = self.rho.clone().slice([0..1, 0..1, 0..self.n, 0..1]).squeeze::<3>(3).squeeze::<2>(1).squeeze::<1>(0);
+        let imag = self.rho.clone().slice([0..1, 0..1, 0..self.n, 1..2]).squeeze::<3>(3).squeeze::<2>(1).squeeze::<1>(0);
+        
+        let mag2 = real.powf_scalar(2.0).add(imag.powf_scalar(2.0));
+        mag2.to_data().to_vec::<f32>().unwrap()
     }
 
     /// Save state to disk (Binary Dump).
