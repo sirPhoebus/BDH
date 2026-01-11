@@ -10,7 +10,9 @@ use std::time::Duration;
 use std::thread;
 use ndarray::Array1;
 use std::collections::VecDeque;
-use serde::Serialize;
+use serde::{Serialize, Deserialize}; // Added Deserialize just in case, but definitely need Chunk
+use bdh_model::data::Chunk; // Import Chunk explicitly
+
 use axum::{
     routing::get,
     response::IntoResponse,
@@ -196,6 +198,7 @@ impl LearningMetrics {
         let trend = self.coherence_trend();
         let trend_symbol = if trend > 0.01 { "📈" } else if trend < -0.01 { "📉" } else { "➡️" };
         
+        /*
         println!("\n╔══════════════════════════════════════════════════════════════════════════╗");
         println!("║                  LEARNING BENCHMARK @ Step {:>6}                        ║", step);
         println!("╠══════════════════════════════════════════════════════════════════════════╣");
@@ -218,12 +221,13 @@ impl LearningMetrics {
         let top3: Vec<_> = top.iter().take(3).map(|(k, v)| format!("{}:{}", k, v)).collect();
         println!("║  Top Concepts:       {:?}                                              ║", top3);
         println!("╚══════════════════════════════════════════════════════════════════════════╝\n");
+        */
     }
 }
 
 #[tokio::main]
 async fn main() {
-    println!("Initializing CENTRAL SIM (Grand Unification)...");
+    // println!("Initializing CENTRAL SIM (Grand Unification)...");
     
     // 0. Setup Networking
     let (tx, _rx) = broadcast::channel::<BrainStateUpdate>(16);
@@ -235,7 +239,7 @@ async fn main() {
         .fallback_service(ServeDir::new("viz"));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("   Visualizer server running at http://localhost:3000");
+    // println!("   Visualizer server running at http://localhost:3000");
     
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -248,7 +252,7 @@ async fn main() {
     let d = 16;
     let layers = 4;
     
-    println!("1. Cortex: Booting GPU Kernel ({} neurons)...", n_neurons);
+    // println!("1. Cortex: Booting GPU Kernel ({} neurons)...", n_neurons);
     let mut cortex: HarmonicBdhBurn<Backend> = HarmonicBdhBurn::new(n_neurons, d, layers, &device);
     
     if std::path::Path::new("brain.state").exists() {
@@ -293,8 +297,9 @@ async fn main() {
     // PRE-EMBED: Process entire corpus in parallel using all CPU cores
     let window_size = 64; // Semantic chunks
     println!("   Pre-embedding corpus (parallel, window={})...", window_size);
-    let mut preembedded: Vec<ndarray::Array1<f32>> = embedder.preembed_corpus_parallel(&current_tokens, window_size);
+    let mut preembedded: Vec<Chunk> = embedder.preembed_corpus_parallel(&current_tokens, window_size);
     let mut chunk_ptr = 0;
+
     println!("   Created {} semantic chunks from {} tokens ({:.1}x compression)", 
              preembedded.len(), current_tokens.len(), 
              current_tokens.len() as f32 / preembedded.len() as f32);
@@ -321,9 +326,11 @@ async fn main() {
         concept_memory.push((name.to_string(), vec.to_vec().into()));
     }
     
-    println!("\nSIMULATION STARTING. Reading: Book 0\n");
+    // println!("\nSIMULATION STARTING. Reading: Book 0\n");
+    /*
     println!("Step | Energy | Valnc | Drive  | Conf | Input Word      | Prediction      | Inner Voice");
     println!("-----+--------+-------+--------+------+-----------------+-----------------+-------------------------------------");
+    */
 
     let mut step = 0;
     
@@ -338,6 +345,7 @@ async fn main() {
     let mut last_narrative = String::new();
     let mut current_memory_event: Option<Vec<f32>> = None;
     let mut current_stimulus: Option<Array1<f32>> = None; 
+    let mut current_word: Option<String> = None;
     let mut is_sleeping = false;
     
     // Learning quality benchmarks
@@ -541,7 +549,7 @@ async fn main() {
                        // DREAM CONSOLIDATION: Periodic Synaptic Scaling
                        if step % 500 == 0 {
                             cortex.consolidate_synapses();
-                            println!("   [Dream] Synaptic Scaling: Consolidating learned patterns...");
+                            // println!("   [Dream] Synaptic Scaling: Consolidating learned patterns...");
                        }
                  } else {
                      cortex.step(None); 
@@ -568,16 +576,17 @@ async fn main() {
     
                 // 2. Read semantic chunk (64 tokens at once)
                 if chunk_ptr < preembedded.len() {
-                    let emb = &preembedded[chunk_ptr];
-                    current_stimulus = Some(emb.clone());
+                    let chunk = &preembedded[chunk_ptr];
+                    current_stimulus = Some(chunk.vector.clone());
+                    current_word = Some(chunk.label.clone());
                     input_word = format!("[chunk:{}]", chunk_ptr);
                     
-                    let emb_vec = emb.to_vec();
+                    let emb_vec = chunk.vector.to_vec();
                     let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
                     
                     // MEMORY RECALL: Contextual Bias (Strict during reading)
                     memory.recall_threshold = 0.65;
-                    if let Some(past_freqs) = memory.recall(emb) {
+                    if let Some(past_freqs) = memory.recall(&chunk.vector) {
                         let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
                         let current_arr = Array1::from(current_freqs);
                         // Soft-blend: 90% current, 10% past
@@ -585,7 +594,7 @@ async fn main() {
                         cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
                         metrics.record_memory_recall();
                         if step % 20 == 0 {
-                            println!("   [Memory] Recalled past context! Biasing learning...");
+                            // println!("   [Memory] Recalled past context! Biasing learning...");
                         }
                     }
 
@@ -596,7 +605,8 @@ async fn main() {
                     
                     // Synaptic Consolidation: Reduced LR during dreaming/reading overlap
                     let lr = if action == Action::Dream { 0.00001 } else { 0.0001 };
-                    cortex.hebbian_learn(&emb_vec, lr); 
+                    let array_emb = &chunk.vector;
+                    cortex.hebbian_learn(array_emb.as_slice().unwrap(), lr); 
                     
                     // Energy cost scaled by window size (64 tokens worth)
                     body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
@@ -608,7 +618,7 @@ async fn main() {
                     // AUTO BOOK DOWNLOAD: Fetch new book from Gutenberg when content exhausted
                     let book_idx = (current_book_idx + step) % GUTENBERG_IDS.len();
                     let book_id = GUTENBERG_IDS[book_idx];
-                    println!("\n--> Finished book! Downloading new book (Gutenberg #{})...", book_id);
+                    // println!("\n--> Finished book! Downloading new book (Gutenberg #{})...", book_id);
                     
                     match download_gutenberg_book(book_id, "data/books") {
                         Ok(path) => {
@@ -618,7 +628,7 @@ async fn main() {
                                 preembedded = embedder.preembed_corpus_parallel(&new_tokens, window_size);
                                 chunk_ptr = 0;
                                 current_book_idx = book_idx;
-                                println!("--> Loaded book {} ({} chunks)", book_id, preembedded.len());
+                                // println!("--> Loaded book {} ({} chunks)", book_id, preembedded.len());
                             }
                         }
                         Err(e) => {
@@ -648,7 +658,16 @@ async fn main() {
             let max_entropy = (layers as f32).ln().max(1.0);
             let confidence = (1.0 - (entropy / max_entropy)).max(0.0).min(1.0);
             
-            // RICH INTERPRETATION: Use Ensemble decoding for conceptual linking
+            // RICH INTERPRETATION: Use Ensemble decoding with Dynamic Phase Epsilon
+            // Tighten epsilon during high arousal (precision), loosen during dreaming (creativity)
+            let arousal_bias = (body.arousal - 0.5) * 0.1; // -0.05 to +0.05
+            let dynamic_epsilon = if action == Action::Dream { 
+                0.20 + arousal_bias 
+            } else { 
+                0.12 + arousal_bias 
+            };
+            interpreter.phase_epsilon = dynamic_epsilon;
+
             let phases = cortex.get_phases();
             let usage = cortex.get_usage_vec();
             let ensemble_concepts = interpreter.interpret_ensemble(
@@ -677,6 +696,37 @@ async fn main() {
             last_narrative = narrative.clone();
             input_word = narrative; // Update input_word for display/reflection
 
+            // --- SELF-DISCOVERY & ASSOCIATIVE LEARNING ---
+            // If the ensemble decoding is weak (best_score < 0.3) but internal focus is high (sum_e > 0.3),
+            // we first check our associative memory for a past match.
+            if best_score < 0.3 {
+                let output_arr = Array1::from(cortical_out.clone());
+                let output_norm = (output_arr.dot(&output_arr)).sqrt().max(1e-8);
+                let output_normalized = &output_arr / output_norm;
+
+                for (name, vec) in &concept_memory {
+                    let vec_norm = (vec.dot(vec)).sqrt().max(1e-8);
+                    let vec_normalized = vec / vec_norm;
+                    let score = output_normalized.dot(&vec_normalized);
+                    if score.abs() > best_score {
+                        best_score = score.abs();
+                        best_concept = name.to_string();
+                    }
+                }
+
+                // If still unrecognized, associate the current *Input Stimulus* word as a NEW concept
+                if let Some(word_str) = &current_word {
+                    if best_score < 0.3 && sum_e > 0.3 && word_str.len() > 3 && word_str != "<unk>" && !word_str.starts_with("[") {
+                        // println!("   [Learning] Associated Word '{}' with new brain state.", word_str);
+                        concept_memory.push((word_str.clone(), output_arr));
+                        metrics.record_concept_learned(word_str.as_str(), step);
+                        best_concept = word_str.clone();
+                        best_score = 1.0; 
+                    }
+                }
+            }
+            // ----------------------------------------------
+
             // MEMORY STORAGE: "Aha!" moment storage
             if best_score > 0.45 && best_concept.len() > 3 && !best_concept.starts_with("[") {
                 if let Some(stim) = &current_stimulus { 
@@ -684,7 +734,7 @@ async fn main() {
                     if memory.store(stim, &Array1::from(current_freqs), best_score, step) {
                         metrics.record_memory_store();
                         if step % 10 == 0 {
-                            println!("   [Memory] Stored high-coherence state: '{}' ({:.2})", best_concept, best_score);
+                            // println!("   [Memory] Stored high-coherence state: '{}' ({:.2})", best_concept, best_score);
                         }
                     }
                 }

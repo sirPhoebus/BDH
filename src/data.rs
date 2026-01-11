@@ -296,12 +296,25 @@ impl Embedder {
             .reduce(|| Array1::zeros(self.n), |a, b| a + b);
         sum / tokens.len() as f32
     }
-    
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Chunk {
+    pub vector: Array1<f32>,
+    pub label: String,
+}
+
+impl Embedder {
     /// Pre-embed entire corpus into windowed chunks using all CPU cores.
-    /// Returns a vector of mean-pooled embeddings for each window.
-    pub fn preembed_corpus_parallel(&self, tokens: &[u32], window_size: usize) -> Vec<Array1<f32>> {
+    /// Returns a vector of Chunks (vector + label).
+    pub fn preembed_corpus_parallel(&self, tokens: &[u32], window_size: usize) -> Vec<Chunk> {
         tokens.par_chunks(window_size)
-            .map(|chunk| self.embed_sequence(chunk))
+            .map(|chunk| {
+                let vector = self.embed_sequence(chunk);
+                // Use the first non-empty word in the chunk as the label for learning
+                let label = self.decode(&[chunk[0]]); 
+                Chunk { vector, label }
+            })
             .collect()
     }
 }

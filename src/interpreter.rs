@@ -64,6 +64,10 @@ impl Interpreter {
         let vocab_size = weights.nrows();
 
         for ensemble in ensembles {
+            // SPURIOUS FILTER: Mitigation for random phase alignment
+            // Relax to 1 to bootstrap learning, then increase back to 2 as population scales
+            if ensemble.len() < 1 { continue; }
+
             // Aggregate the meaning of the ensemble
             let mut ensemble_vector: Array1<f32> = Array1::zeros(vocab_size);
             let mut total_activity = 0.0;
@@ -82,11 +86,18 @@ impl Interpreter {
             }
 
             if total_activity > 0.0 {
+                // UNIT-SPHERE PROJECTION: Post-normalization of the centroid
+                // Find normalized direction to prevent "origin collapse" in high dimensions
                 let mut best_word_id = 0;
                 let mut max_sim = -1.0;
                 
+                // Normalize the ensemble vector for cosine comparison
+                let norm = ensemble_vector.mapv(|x| x * x).sum().sqrt().max(1e-9);
+                let normalized_vector = ensemble_vector / norm;
+
                 for v in 0..vocab_size {
-                    let sim = ensemble_vector[v] / total_activity;
+                    // Sim is now a pure projection onto the unit sphere
+                    let sim = normalized_vector[v];
                     if sim > max_sim {
                         max_sim = sim;
                         best_word_id = v;
