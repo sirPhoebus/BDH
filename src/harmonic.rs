@@ -254,7 +254,7 @@ impl HarmonicBdh {
     }
     
     /// (A) SPONTANEOUS ACTIVITY with van der Pol self-excitation.
-    fn inject_spontaneous_activity(&self, layer: usize) -> (Array1<f32>, Array1<f32>) {
+    pub fn inject_spontaneous_activity(&self, layer: usize) -> (Array1<f32>, Array1<f32>) {
         let mut rng = rand::thread_rng();
         let layer_freq = self.layer_frequencies[layer];
         let adaptive = self.adaptive_noise[layer];
@@ -461,7 +461,7 @@ impl HarmonicBdh {
     }
     
     /// Update standing wave with self-excitation.
-    fn update_standing_wave(&mut self, excitation: &Array1<f32>, self_excite: &Array1<f32>, layer: usize) {
+    fn _update_standing_wave(&mut self, excitation: &Array1<f32>, self_excite: &Array1<f32>, layer: usize) {
         let dt = 0.1;
         let layer_damp = self.layer_damping[layer];
         
@@ -798,6 +798,115 @@ impl HarmonicBdh {
             ThoughtState::Transitioning
         }
     }
+
+    /// Integrate physiological signals from the body to modulate neural dynamics.
+    /// 
+    /// Signals: [Energy, Integrity, Pleasure, Pain]
+    pub fn integrate_body_signals(&mut self, signals: &[f32]) {
+        if signals.len() < 4 { return; }
+
+        let energy = signals[0];
+        // let integrity = signals[1];
+        let pleasure = signals[2];
+        let pain = signals[3];
+
+        // 1. Energy Modulation: Low energy -> Slow frequencies (Theta/Delta)
+        if energy < 0.4 {
+            // Shift layer frequencies down to induce "sleep/groggy" state
+            for freq in &mut self.layer_frequencies {
+                *freq = (*freq * 0.95).max(0.5); 
+            }
+            // Increase damping to reduce activity
+            self.config.base_damping = (self.config.base_damping + 0.01).min(0.99);
+        } else {
+            // Restore energy -> Restore frequencies (simplified reset towards default logic)
+            for freq in &mut self.layer_frequencies {
+                 *freq = (*freq * 1.01).min(80.0);
+            }
+            
+            // "Restless Energy": If body is full of energy (> 0.8), crave activity!
+            if energy > 0.8 {
+                // Increase damping factor (closer to 1.0) to sustain activity better
+                self.config.base_damping = (self.config.base_damping + 0.01).min(0.999);
+                
+                // Boost base noise amplitude so it doesn't decay away
+                self.config.noise_amplitude = (self.config.noise_amplitude + 0.05).min(0.5);
+                
+                // Also bump current adaptive noise
+                for layer in 0..self.num_layers {
+                    self.adaptive_noise[layer] = (self.adaptive_noise[layer] + 0.1).min(0.8);
+                }
+            }
+        }
+
+        // 2. Valence Modulation (Pleasure/Pain)
+        let valence = pleasure - pain;
+
+        if valence > 0.1 {
+            // Pleasure: Decrease damping (Reinforcement/Excitement)
+            self.config.base_damping = (self.config.base_damping - 0.02 * valence).max(0.5);
+            // Boost self-excitation (Confidence)
+            self.config.self_excitation = (self.config.self_excitation + 0.005 * valence).min(0.1);
+        } else if valence < -0.1 {
+            // Pain: Increase damping (Inhibition/Avoidance)
+            self.config.base_damping = (self.config.base_damping + 0.05 * pain).min(0.98);
+            // Scramble: Inject noise to break current pattern (Flight/Flinch)
+            for layer in 0..self.num_layers {
+                self.adaptive_noise[layer] += 0.2 * pain;
+            }
+        }
+    }
+
+    /// Compute novelty as the Euclidean distance between current output and previous state.
+    /// Returns a value roughly 0.0 to 1.0+.
+    pub fn compute_novelty(&self, current_output: &Array1<f32>, last_output: &Array1<f32>) -> f32 {
+        let diff = current_output - last_output;
+        let dist_sq: f32 = diff.mapv(|x| x * x).sum();
+        dist_sq.sqrt()
+    }
+
+    /// Apply motivation to the neural parameters.
+    /// 
+    /// # Arguments
+    /// * `drive`: Name of the dominant drive (e.g., "HUNGER", "CURIOSITY")
+    pub fn motivate(&mut self, drive: Option<&str>) {
+        // Reset baseline modifiers first (simplified)
+        // self.config.noise_amplitude = 0.07; // We accept drift for now
+        
+        match drive {
+            Some("HUNGER") => {
+                // Hunger: Focused Seeking.
+                // High Gamma (fast processing), Moderate Noise (action bias).
+                // In a real semantic brain, this would prime "Food" nodes.
+                
+                // Increase gain/excitability
+                self.config.self_excitation = (self.config.self_excitation + 0.01).min(0.15);
+                
+                // Bias frequencies slightly up
+                for freq in &mut self.layer_frequencies {
+                    *freq = (*freq * 1.05).min(100.0);
+                }
+            },
+            Some("CURIOSITY") => {
+                // Curiosity: Exploration.
+                // High Noise (random State jumping), Lower Damping (volatility).
+                
+                // Boost noise significantly
+                 for layer in 0..self.num_layers {
+                    self.adaptive_noise[layer] = (self.adaptive_noise[layer] + 0.2).min(1.5);
+                }
+                
+                // Lower damping to allow new patterns to form
+                self.config.base_damping = (self.config.base_damping - 0.05).max(0.6);
+            },
+            None => {
+                // Contentment / Homeostasis
+                // Slowly relax parameters back to baseline? 
+                // For now, do nothing.
+            }
+            _ => {}
+        }
+    }
     
     /// Get top matching concepts via cosine similarity.
     pub fn get_top_concepts(&self, state: &Array1<f32>, top_k: usize) -> Vec<(&'static str, f32)> {
@@ -814,6 +923,76 @@ impl HarmonicBdh {
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(top_k);
         scores
+    }
+    
+    /// Retrieve the vector for a specific concept by name (case-insensitive).
+    pub fn get_concept_vector(&self, name: &str) -> Option<Array1<f32>> {
+        self.concepts.iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .map(|c| c.vector.clone())
+    }
+
+    /// Calculate Shannon entropy of the energy distribution across layers.
+    /// High entropy = Low Confidence.
+    pub fn calculate_entropy(&self, energies: &[f32]) -> f32 {
+        let sum: f32 = energies.iter().sum();
+        if sum < 0.001 { return 0.0; }
+        
+        let mut entropy = 0.0;
+        for &e in energies {
+            let p = e / sum;
+            if p > 0.0 {
+                entropy -= p * p.ln();
+            }
+        }
+        entropy
+    }
+
+    /// Get a confidence score (0.0 to 1.0) based on current state entropy.
+    /// 1.0 = Highly focused/confident. 0.0 = Chaotic/Unsure.
+    pub fn get_confidence(&self, energies: &[f32]) -> f32 {
+        let entropy = self.calculate_entropy(energies);
+        // Max entropy for N layers is ln(N). 
+        // Normalize: 1 - (entropy / max_entropy)
+        let max_entropy = (self.num_layers as f32).ln().max(1.0);
+        (1.0 - (entropy / max_entropy)).max(0.0).min(1.0)
+    }
+
+    /// Self-Discovery: Check if the current state is novel enough to be a new concept.
+    /// If so, add it to the concept memory.
+    /// Returns the name of the new concept if created.
+    pub fn learn_new_concept(&mut self, state: &Array1<f32>) -> Option<String> {
+        // threshold for novelty (1.0 - cosine similarity)
+        // Lowered to 0.1 for demo sensitivity
+        let novelty_threshold = 0.1; 
+        
+        let mut min_dist = 1.0;
+        for c in &self.concepts {
+            let similarity = state.dot(&c.vector); // Assumes normalized
+            let dist = 1.0 - similarity;
+            if dist < min_dist {
+                min_dist = dist;
+            }
+        }
+        
+        // If the nearest concept is too far away, this is a new idea.
+        if min_dist > novelty_threshold {
+            let new_id = self.concepts.len();
+            let name = format!("Concept_{}", new_id);
+            
+            // Normalize state for storage
+            let norm = state.dot(state).sqrt();
+            let vector = if norm > 0.0 { state / norm } else { state.clone() };
+            
+            self.concepts.push(Concept {
+                name: Box::leak(name.clone().into_boxed_str()), // Leak memory to get 'static str (Demo hack)
+                vector,
+            });
+            
+            return Some(name);
+        }
+        
+        None
     }
     
     fn project_internal_state(&self) -> Array1<f32> {

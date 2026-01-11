@@ -17,3 +17,6 @@ walkdir = "2.4"  # Directory traversal
 indicatif = "0.17"  # Progress bars
 serde_json = "1.0"  # JSON parsing
 urlencoding = "2.1"  # URL encoding
+burn = { version = "0.14.0", features = ["wgpu", "train"] }
+burn-wgpu = "0.14.0"
+burn-ndarray = "0.14.0"

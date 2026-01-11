@@ -6,6 +6,11 @@ use rand::{thread_rng, Rng};
 
 pub mod lsh;
 pub mod harmonic;
+pub mod regions;
+pub mod body;
+pub mod drives;
+pub mod interpreter;
+pub mod harmonic_burn;
 pub mod data;
 pub mod training;
 pub mod continual;
@@ -211,11 +216,10 @@ impl ChronosBdh {
         // If energy is low (< 0.25), boost the chance significantly to prevent getting stuck
         let base_recall_prob = 0.02f64; // 2%
         let low_energy_bias = if self.energy_history < 0.25 { 0.05f64 } else { 0.0f64 };
-        let recall_prob = base_recall_prob + low_energy_bias;
+        let _recall_prob = base_recall_prob + low_energy_bias;
 
         let mut current_input = input.clone();
         
-        let mut current_input = input.clone();
         
         // 2. Heartbeat-Modulated Noise (Systole/Diastole)
         // Peak (Systole) -> High Noise (Exploration)
