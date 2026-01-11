@@ -178,9 +178,10 @@ fn main() {
         // 3. High DA (Flow) -> READ (Sustain)
         // 4. High Curiosity -> REFLECT (Meta-cognitive check)
         
-        let action = if body.chemicals.acetylcholine < 0.3 {
+        // Thresholds: Raise ACh threshold to 0.6 to see dreaming sooner for demo
+        let action = if body.chemicals.acetylcholine < 0.6 {
              Action::Dream
-        } else if body.chemicals.norepinephrine > 0.7 {
+        } else if body.chemicals.norepinephrine > 0.8 {
              Action::Skip // Panic/Overwhelmed
         } else if drives.curiosity > 0.7 && step % 40 == 0 {
              Action::Reflect
@@ -193,22 +194,33 @@ fn main() {
         
         match action {
              Action::Dream => {
-                // --- DREAMING (Deep Reflection) ---
+                // --- DREAMING (Deep Reflection / Self-Thinking) ---
+                // No external input. We feed the Cortex its own output (Associative Chaining).
                 let cortical_out = cortex.get_cortical_output();
                 let output_arr = Array1::from(cortical_out);
-                let (next_token, _conf) = embedder.decode_nearest(&output_arr);
-                input_word = next_token.clone();
-                prediction = format!("(Dreaming) {}", input_word);
+                let (next_token, confidence) = embedder.decode_nearest(&output_arr);
                 
-                // Feedback
-                let self_talk = format!("I dream of {}", input_word);
+                input_word = format!("~{}~", next_token); // denote dream
+                prediction = "(Internal)".to_string();
+                
+                // Feedback: Stronger Self-Excitation loop
+                let self_talk = format!("I imagine {}", next_token);
                 let feedback_vector = interpreter.reflect(&self_talk, &embedder);
                 let emb_vec = feedback_vector.to_vec();
                 let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
+                
+                // Dream Input is weaker/noisier? Or Stronger?
+                // Strong recurrent input drives the hallucination.
                 let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
                 cortex.step(Some(input_3d));
                 
-                body.energy = (body.energy - 0.001).max(0.0);
+                // Dreaming recovers Energy (Sleep)
+                body.energy = (body.energy + 0.01).min(1.0);
+                
+                // If the dream is vivid (high confidence), boost Dopamine (Pleasure of thinking)
+                if confidence > 0.8 {
+                     body.chemicals.dopamine = (body.chemicals.dopamine + 0.05).min(1.0);
+                }
              },
              
              Action::Reflect => {
@@ -229,8 +241,10 @@ fn main() {
              Action::Skip => {
                  // --- SKIPPING ---
                  // Fast forward to find novelty
-                 input_word = "(Skipping)".to_string();
+                 input_word = ">>".to_string();
                  token_ptr += 10;
+                 if token_ptr >= current_tokens.len() { token_ptr = 0; } // wrap safety
+                 
                  // Small energy cost for skipping
                  body.energy = (body.energy - 0.002).max(0.0);
                  cortex.step(None); // Brain is "offline" while skipping
@@ -259,7 +273,9 @@ fn main() {
                     
                     cortex.step(Some(final_input));
                     
-                    body.energy = (body.energy + 0.01).min(1.0);
+                    // Reading CONSUMES Energy (Mental Effort)
+                    body.energy = (body.energy - 0.005).max(0.0);
+                    
                     token_ptr += 1;
                 } else {
                     cortex.step(None);
