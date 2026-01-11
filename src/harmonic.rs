@@ -43,15 +43,16 @@ pub struct BiologicalConfig {
 
 impl Default for BiologicalConfig {
     fn default() -> Self {
+        // OPTIMAL config from benchmark_variants (best spontaneous activity)
         Self {
-            noise_amplitude: 0.02,        // Moderate background noise
-            cross_freq_coupling: 0.3,     // Moderate theta-gamma binding
-            homeostatic_threshold: 0.5,   // Energy threshold for "boredom"
-            homeostatic_rate: 0.02,       // Slow adaptation
-            base_damping: 0.95,           // 5% base energy loss
-            self_excitation: 0.015,       // Van der Pol nonlinearity
-            endogenous_drive: 0.008,      // Weak endogenous oscillation in layer 0
-            adaptive_noise_rate: 0.1,     // How fast noise adapts to low energy
+            noise_amplitude: 0.045,       // Higher noise for sustained activity
+            cross_freq_coupling: 0.38,    // Strong theta-gamma binding
+            homeostatic_threshold: 0.12,  // Low threshold = faster boredom
+            homeostatic_rate: 0.14,       // Fast adaptation
+            base_damping: 0.93,           // 7% base energy loss
+            self_excitation: 0.055,       // Strong van der Pol limit cycle
+            endogenous_drive: 0.028,      // Strong endogenous oscillation in layer 0
+            adaptive_noise_rate: 0.28,    // Fast noise adaptation
             layer_frequencies: vec![],    // Empty = use default
         }
     }
