@@ -106,6 +106,13 @@ impl BodyState {
         }
     }
 
+    /// Direct neurochemical release (e.g. from internal brain structures).
+    pub fn release(&mut self, da: f32, ne: f32, ach: f32) {
+        self.chemicals.dopamine = (self.chemicals.dopamine + da).clamp(0.0, 1.0);
+        self.chemicals.norepinephrine = (self.chemicals.norepinephrine + ne).clamp(0.0, 1.0);
+        self.chemicals.acetylcholine = (self.chemicals.acetylcholine + ach).clamp(0.0, 1.0);
+    }
+
     /// Check if the body is in a "resting" state (useful for logic).
     pub fn is_resting(&self) -> bool {
         // Heuristic: resting if no recent major valence

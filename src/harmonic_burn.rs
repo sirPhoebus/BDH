@@ -48,14 +48,14 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         // Shape: [Layers, Modes, Neurons, 2]
         let rho = Tensor::<B, 4>::zeros([num_layers, d, n, 2], device);
         
-        // Initialize Frequencies (Linear gradient for now)
-        // 0.1 to 2PI
-        let freq_data: Vec<f32> = (0..n).map(|i| 0.1 + (i as f32 / n as f32) * 6.28).collect();
+        // Initialize Frequencies (Reduced for numerical stability)
+        // 0.1 to 1.0 (Was 6.28)
+        let freq_data: Vec<f32> = (0..n).map(|i| 0.1 + (i as f32 / n as f32) * 0.9).collect();
         let natural_freq = Tensor::<B, 1>::from_floats(freq_data.as_slice(), device);
 
-        // Initialize Layer Frequencies (Exponential)
+        // Initialize Layer Frequencies (Reduced)
         let layer_freq_data: Vec<f32> = (0..num_layers)
-            .map(|l| 1.0 * (2.0_f32).powf(l as f32 * 3.0 / num_layers as f32))
+            .map(|l| 1.0 + (l as f32 * 0.5))
             .collect();
         let layer_freq = Tensor::<B, 1>::from_floats(layer_freq_data.as_slice(), device);
 
@@ -89,7 +89,7 @@ impl<B: Backend> HarmonicBdhBurn<B> {
             natural_freq,
             layer_freq,
             damping,
-            base_dt: 0.1,
+            base_dt: 0.01,
             noise_scale: 0.0,
             input_gain: 0.1,
             self_excitation: 0.02,
@@ -238,7 +238,7 @@ impl<B: Backend> HarmonicBdhBurn<B> {
         let flat_real = new_real.clone().slice([0..1, 0..1, 0..self.n]).reshape([self.n]);
         let mean = flat_real.clone().mean();
         let var = flat_real.clone().var(0);
-        let std = var.sqrt();
+        let std = var.clamp_min(0.0).sqrt();
         let threshold = mean.add(std.mul_scalar(self.inhibition_factor));
         
         // Soft inhibition: keep full value if above threshold, else scale down

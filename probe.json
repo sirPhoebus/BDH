@@ -1,1 +1,15 @@
-{"step":520,"coherence":0.0479,"diversity":0.3070,"concepts_learned":7,"energy_stability":0.850,"read_steps":270,"dream_steps":250,"mem_stores":0,"mem_recalls":0,"chunk_ptr":270,"book_chunks":1489}
+{
+                    "step": 5500,
+                    "coherence": 0.0312,
+                    "diversity": 0.5806,
+                    "concepts_learned": 7,
+                    "energy_stability": 0.4451,
+                    "read_steps": 2846,
+                    "dream_steps": 2654,
+                    "mem_stores": 0,
+                    "mem_recalls": 0,
+                    "chunk_ptr": 1356,
+                    "book_chunks": 2605,
+                    "surprise": 0.9698,
+                    "cortical_energy": 0.0559
+                }

@@ -167,8 +167,9 @@ impl LearningMetrics {
         if self.total_recognitions == 0 { return 0.0; }
         let unique = self.concept_counts.len() as f32;
         let total = self.total_recognitions as f32;
-        // Entropy-like measure: higher = more diverse, max = 1.0
-        unique / total.sqrt()
+        // Entropy-like measure: higher = more diverse
+        // User suggestion: unique / log(total) to prevent artificial decay
+        unique / (total.ln().max(1.0))
     }
     
     fn avg_coherence(&self) -> f32 {
@@ -307,6 +308,7 @@ async fn main() {
     println!("   Pre-embedding corpus (parallel, window={})...", window_size);
     let mut preembedded: Vec<Chunk> = embedder.preembed_corpus_parallel(&current_tokens, window_size);
     let mut chunk_ptr = 0;
+    let mut last_prediction: Option<Array1<f32>> = None;
 
     println!("   Created {} semantic chunks from {} tokens ({:.1}x compression)", 
              preembedded.len(), current_tokens.len(), 
@@ -483,6 +485,10 @@ async fn main() {
         let mut input_word = "".to_string();
         let mut prediction = "".to_string();
         
+        // Initialize loop variables
+        let mut surprise = 0.0;
+        let mut learning_rate_modulation = 1.0;
+        
         match action {
              Action::Dream => {
                 // --- DREAMING (Episodic Replay + Chaining) ---
@@ -547,106 +553,118 @@ async fn main() {
              Action::Reflect => {
                  // --- REFLECTION ---
                  if !last_narrative.is_empty() {
-                      input_word = "self".to_string();
-                      let echo_vec = interpreter.reflect(&last_narrative, &embedder);
-                      let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
-                       let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
-                       current_stimulus = Some(echo_vec);
-                       cortex.step(Some(input_3d));
+                       input_word = "self".to_string();
+                       let echo_vec = interpreter.reflect(&last_narrative, &embedder);
+                       let echo_tensor = Tensor::<Backend, 1>::from_floats(echo_vec.to_vec().as_slice(), &device);
+                        let input_3d = echo_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
+                        current_stimulus = Some(echo_vec);
+                        cortex.step(Some(input_3d));
 
-                       // DREAM CONSOLIDATION: Periodic Synaptic Scaling
-                       if step % 500 == 0 {
-                            cortex.consolidate_synapses();
-                            // println!("   [Dream] Synaptic Scaling: Consolidating learned patterns...");
-                       }
-                 } else {
-                     cortex.step(None); 
-                 }
-             },
-             
-             Action::Skip => {
-                 // --- SKIPPING (Foraging) ---
-                 input_word = ">>".to_string();
-                 chunk_ptr += 5; // Skip 5 chunks (~320 tokens)
-                 if chunk_ptr >= preembedded.len() { chunk_ptr = 0; } 
-                  body.energy = (body.energy - 0.01).max(0.0);
-                  current_stimulus = None;
-                  cortex.step(None);
-             },
-             
+                        // DREAM CONSOLIDATION: Periodic Synaptic Scaling
+                        if step % 500 == 0 {
+                             cortex.consolidate_synapses();
+                             // println!("   [Dream] Synaptic Scaling: Consolidating learned patterns...");
+                        }
+                  } else {
+                      cortex.step(None); 
+                  }
+              },
+              
+              Action::Skip => {
+                  // --- SKIPPING (Foraging) ---
+                  input_word = ">>".to_string();
+                  chunk_ptr += 5; // Skip 5 chunks (~320 tokens)
+                  if chunk_ptr >= preembedded.len() { chunk_ptr = 0; } 
+                   body.energy = (body.energy - 0.01).max(0.0);
+                   current_stimulus = None;
+                   cortex.step(None);
+              },
+              
              Action::Read => {
                  // --- READING (BATCH MODE: 64 tokens per physics step) ---
-                // 1. Prediction
-                let cortical_out = cortex.get_cortical_output();
-                let out_vec = Array1::from(cortical_out);
-                let (predicted_token, _confidence) = embedder.decode_nearest(&out_vec);
-                prediction = predicted_token;
-    
-                // 2. Read semantic chunk (64 tokens at once)
-                if chunk_ptr < preembedded.len() {
-                    let chunk = &preembedded[chunk_ptr];
-                    current_stimulus = Some(chunk.vector.clone());
-                    current_word = Some(chunk.label.clone());
-                    input_word = format!("[chunk:{}]", chunk_ptr);
-                    
-                    let emb_vec = chunk.vector.to_vec();
-                    let input_tensor = Tensor::<Backend, 1>::from_floats(emb_vec.as_slice(), &device);
-                    
-                    // MEMORY RECALL: Contextual Bias (Strict during reading)
-                    memory.recall_threshold = 0.65;
-                    if let Some(past_freqs) = memory.recall(&chunk.vector) {
-                        let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
-                        let current_arr = Array1::from(current_freqs);
-                        // Soft-blend: 90% current, 10% past
-                        let blended = (&current_arr * 0.9) + (&past_freqs * 0.1);
-                        cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
-                        metrics.record_memory_recall();
-                        if step % 20 == 0 {
-                            // println!("   [Memory] Recalled past context! Biasing learning...");
-                        }
-                    }
-
-                    let input_3d = input_tensor.reshape([1, 1, n_neurons]).expand([layers, d, n_neurons]);
-                    
-                    let final_input = input_3d.add(bias_3d);
-                    cortex.step(Some(final_input));
-                    
-                    // Synaptic Consolidation: Reduced LR during dreaming/reading overlap
-                    let lr = if action == Action::Dream { 0.00001 } else { 0.0001 };
-                    let array_emb = &chunk.vector;
-                    cortex.hebbian_learn(array_emb.as_slice().unwrap(), lr); 
-                    
-                    // Energy cost scaled by window size (64 tokens worth)
-                    body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
-                    chunk_ptr += 1;
-                } else {
-                    cortex.step(None);
-                    input_word = "<LOADING>".to_string();
-                    
-                    // AUTO BOOK DOWNLOAD: Fetch new book from Gutenberg when content exhausted
-                    let book_idx = (current_book_idx + step) % GUTENBERG_IDS.len();
-                    let book_id = GUTENBERG_IDS[book_idx];
-                    // println!("\n--> Finished book! Downloading new book (Gutenberg #{})...", book_id);
-                    
-                    match download_gutenberg_book(book_id, "data/books") {
-                        Ok(path) => {
-                            // Load and embed the new book
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                let new_tokens = embedder.tokenize(&content);
-                                preembedded = embedder.preembed_corpus_parallel(&new_tokens, window_size);
-                                chunk_ptr = 0;
-                                current_book_idx = book_idx;
-                                // println!("--> Loaded book {} ({} chunks)", book_id, preembedded.len());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("--> Failed to download book {}: {}", book_id, e);
-                            // Fallback: loop current book
-                            chunk_ptr = 0;
-                        }
-                    }
-                }
-             }
+                 // 1. Prediction for display
+                 let cortical_out = cortex.get_cortical_output();
+                 let out_vec = Array1::from(cortical_out);
+                 let (predicted_token, _confidence) = embedder.decode_nearest(&out_vec);
+                 prediction = predicted_token;
+     
+                 if chunk_ptr < preembedded.len() {
+                     let chunk = &preembedded[chunk_ptr];
+                     current_stimulus = Some(chunk.vector.clone());
+                     current_word = Some(chunk.label.clone());
+                     input_word = format!("[chunk:{}]", chunk_ptr);
+                     
+                     // MEMORY RECALL
+                     memory.recall_threshold = 0.65;
+                     if let Some(past_freqs) = memory.recall(&chunk.vector) {
+                         let current_freqs = cortex.natural_freq.to_data().to_vec::<f32>().unwrap();
+                         let current_arr = Array1::from(current_freqs);
+                         let blended = (&current_arr * 0.9) + (&past_freqs * 0.1);
+                         cortex.natural_freq = Tensor::<Backend, 1>::from_floats(blended.as_slice().unwrap(), &device);
+                         metrics.record_memory_recall();
+                     }
+ 
+                     // --- PREDICTIVE CODING: ERROR SIGNAL ---
+                     surprise = 0.0;
+                     learning_rate_modulation = 1.0;
+                     let array_emb = &chunk.vector;
+                     
+                     if let Some(last_pred) = &last_prediction {
+                          let input_norm = (array_emb.dot(array_emb)).sqrt().max(1e-8);
+                          let input_normalized = array_emb / input_norm;
+                          let similarity = last_pred.dot(&input_normalized);
+                          surprise = (1.0 - similarity).max(0.0).min(1.0);
+                          
+                          learning_rate_modulation = 1.0 + (surprise * 2.0);
+                          if surprise > 0.5 {
+                              body.release(0.0, surprise * 0.1, 0.0);
+                          }
+                     }
+     
+                     // Send to Cortex
+                     let input_tensor: Tensor<Backend, 3> = Tensor::<Backend, 1>::from_floats(array_emb.as_slice().unwrap(), &device)
+                         .reshape([1, 1, n_neurons])
+                         .expand([layers, d, n_neurons]);
+                         
+                     let final_input = input_tensor.add(bias_3d);
+                     
+                     
+                     cortex.step(Some(final_input));
+     
+                     // Hebbian Learning
+                     let base_lr = 0.01;
+                     // Only learn during Read action here
+                     cortex.hebbian_learn(array_emb.as_slice().unwrap(), base_lr * learning_rate_modulation);
+                     
+                     // Update Prediction
+                     let current_out = cortex.get_cortical_output_norm().unwrap_or(Array1::zeros(n_neurons));
+                     last_prediction = Some(current_out);
+                     
+                     body.energy = (body.energy - 0.001 * window_size as f32).max(0.0);
+                     chunk_ptr += 1;
+                 } else {
+                     cortex.step(None);
+                     input_word = "<LOADING>".to_string();
+                     
+                     // AUTO BOOK DOWNLOAD
+                     let book_idx = (current_book_idx + step) % GUTENBERG_IDS.len();
+                     let book_id = GUTENBERG_IDS[book_idx];
+                     
+                     match download_gutenberg_book(book_id, "data/books") {
+                         Ok(path) => {
+                             if let Ok(content) = std::fs::read_to_string(&path) {
+                                 let new_tokens = embedder.tokenize(&content);
+                                 preembedded = embedder.preembed_corpus_parallel(&new_tokens, window_size);
+                                 chunk_ptr = 0;
+                                 current_book_idx = book_idx;
+                             }
+                         }
+                         Err(e) => {
+                             chunk_ptr = 0; // Loop if fail
+                         }
+                     }
+                 }
+              }
         }
         
         // --- E. Readout (every step is now meaningful - processing 64 tokens) ---
@@ -782,6 +800,19 @@ async fn main() {
                  }
             }
 
+            // --- HOMEOSTATIC REGULATION ---
+            // NUCLEUS COERULEUS: Boredom / Frustration
+            // If diversity is low, we are stuck in a loop. INCREASE NOISE.
+            let diversity = metrics.concept_diversity();
+            if diversity < 0.2 && step > 500 {
+                 let frustration = (0.2 - diversity) * 5.0; // 0.0 to 1.0
+                 // Boost NE significantly to break attractors
+                 body.chemicals.norepinephrine += frustration * 0.1;
+                 // reduce dopamine to stop reinforcement of current state
+                 body.chemicals.dopamine *= 0.95;
+            }
+
+
             if env_valence != 0.0 {
                  body.update(0.1, env_valence);
             }
@@ -801,21 +832,36 @@ async fn main() {
                 metrics.print_benchmark(step);
                 
                 // FILE PROBE: Write current state to probe.json for external monitoring
-                let probe_data = format!(
-                    r#"{{"step":{},"coherence":{:.4},"diversity":{:.4},"concepts_learned":{},"energy_stability":{:.3},"read_steps":{},"dream_steps":{},"mem_stores":{},"mem_recalls":{},"chunk_ptr":{},"book_chunks":{}}}"#,
-                    step, 
-                    metrics.avg_coherence(),
-                    metrics.concept_diversity(),
-                    metrics.concepts_now,
-                    metrics.energy_stability(),
-                    metrics.read_steps,
-                    metrics.dream_steps,
-                    metrics.memory_stores,
-                    metrics.memory_recalls,
-                    chunk_ptr,
-                    preembedded.len()
-                );
-                let _ = std::fs::write("probe.json", probe_data);
+                let _ = std::fs::write("probe.json", format!(
+                r#"{{
+                    "step": {},
+                    "coherence": {:.4},
+                    "diversity": {:.4},
+                    "concepts_learned": {},
+                    "energy_stability": {:.4},
+                    "read_steps": {},
+                    "dream_steps": {},
+                    "mem_stores": {},
+                    "mem_recalls": {},
+                    "chunk_ptr": {},
+                    "book_chunks": {},
+                    "surprise": {:.4},
+                    "cortical_energy": {:.4}
+                }}"#,
+                step,
+                cortex.get_phases().iter().map(|p| p.sin()).sum::<f32>().abs() / n_neurons as f32, // Simplified coherence
+                metrics.concept_diversity(),
+                metrics.concepts_now,
+                body.energy,
+                metrics.read_steps,
+                metrics.dream_steps,
+                metrics.memory_stores,
+                metrics.memory_recalls,
+                chunk_ptr,
+                preembedded.len(),
+                surprise,
+                sum_e
+            ));
             }
 
         }

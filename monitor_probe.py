@@ -36,7 +36,12 @@ def init():
 
 # Initialize plots
 fig = plt.figure(figsize=(12, 10))
-fig.suptitle('Brain Simulation Telemetry', fontsize=16)
+fig.suptitle('Brain Simulation Telemetry (Press q or Esc to exit)', fontsize=16)
+
+def on_key(event):
+    if event.key in ['q', 'escape']:
+        plt.close(fig)
+fig.canvas.mpl_connect('key_press_event', on_key)
 
 # We'll determine the layout dynamically based on number of fields
 numeric_keys = []
