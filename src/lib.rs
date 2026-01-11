@@ -1,6 +1,8 @@
 use ndarray::{prelude::*, Axis};
 use ndarray_rand::{rand_distr::Normal, RandomExt};
-use rand::thread_rng;
+use rand::{thread_rng, Rng};
+
+
 
 pub mod lsh;
 pub mod harmonic;
@@ -138,10 +140,23 @@ pub struct ChronosBdh {
     pub n: usize,
     pub d: usize,
     pub global_time: f32,
-    pub heartbeat_freq: f32, // The "metabolic rate" of the model
+    pub heartbeat_freq: f32,
+    pub heartbeat_strength: f32, // New: Strength of heartbeat pulse
+    pub rho_decay: f32,         // New: Forgetfulness factor
+    pub energy_history: f32,    // New: Track energy for bias
+    pub learning_rate: f32,     // New: Oja's rule learning rate
+    pub last_recall_triggered: bool, // Track if recall happened this step
+    
+    // Associative Chaining
+    pub last_output: Option<Array1<f32>>,
+    pub associative_momentum: f32, // Strength of previous thought's influence
+
+
     pub rho_phase: Vec<Array2<f32>>,
+
     pub coupling_strength: Array2<f32>,
 }
+
 
 impl ChronosBdh {
     pub fn new(n: usize, d: usize, heartbeat_freq: f32, num_layers: usize) -> Self {
@@ -152,15 +167,30 @@ impl ChronosBdh {
         // Initialize coupling strength (projection matrix)
         let coupling_strength = Array2::random_using((d, n), dist, &mut rng);
         
-        // Initialize rho phases for each layer
-        let rho_phase = vec![Array2::zeros((d, n)); num_layers];
+        // Initialize rho phases with small noise to bootstrap activity
+        // Avoiding straight zeros allows the system to have some initial resonance
+        let mut rho_phase = Vec::new();
+        for _ in 0..num_layers {
+            rho_phase.push(Array2::random_using((d, n), Normal::new(0.0, 0.1).unwrap(), &mut rng));
+        }
+
 
         Self { 
             n, 
             d, 
             global_time: 0.0, 
-            heartbeat_freq, 
+            heartbeat_freq, // Recommended: 0.2 - 0.8 Hz
+            heartbeat_strength: 0.7, // Default: 0.7 (Range 0.6 - 0.85)
+            rho_decay: 1.0,          // No decay, rely on Clamping
+            energy_history: 0.0,
+            learning_rate: 0.1,      // Faster learning (0.1)
+            last_recall_triggered: false,
+            
+            last_output: None,
+            associative_momentum: 0.05, // Default momentum
+            
             rho_phase, 
+
             coupling_strength 
         }
     }
@@ -170,31 +200,117 @@ impl ChronosBdh {
     }
 
     pub fn forward_with_time(&mut self, input: &Array1<f32>, layer: usize) -> Array1<f32> {
-        // 1. Calculate the Heartbeat Factor
-        // This modulates how "receptive" the model is at this exact millisecond
-        let heartbeat = (self.global_time * self.heartbeat_freq).sin().abs();
+        let mut rng = thread_rng();
 
-        // 2. Temporal Gating
-        // If the heartbeat is at a "trough," the signal is dampened (Filtering noise)
-        // If at a "peak," the model is highly plastic and reactive
-        let temporal_input = input * heartbeat;
+        // 1. Calculate the Pulsed Heartbeat Factor
+        // Range: ~0.0 to heartbeat_strength
+        let heartbeat = (self.global_time * self.heartbeat_freq).sin().abs() * self.heartbeat_strength;
 
-        // 3. Update Rho with Time-Weighted Hebbian Learning
-        // The "Memory" now knows WHEN it happened based on the phase of the heartbeat
+        // 2. Probabilistic Recall Trigger (Chaos/Random Cue)
+        // Base chance: 0.5% - 3% per step
+        // If energy is low (< 0.25), boost the chance significantly to prevent getting stuck
+        let base_recall_prob = 0.02f64; // 2%
+        let low_energy_bias = if self.energy_history < 0.25 { 0.05f64 } else { 0.0f64 };
+        let recall_prob = base_recall_prob + low_energy_bias;
+
+        let mut current_input = input.clone();
         
+        let mut current_input = input.clone();
+        
+        // 2. Heartbeat-Modulated Noise (Systole/Diastole)
+        // Peak (Systole) -> High Noise (Exploration)
+        // Trough (Diastole) -> Low Noise (Settling)
+        // heartbeat is abs(sin), so 0..1. 
+        // We want noise to scale with this.
+        let noise_scale = 0.2 * heartbeat; // Max noise 0.2 at peak
+        
+        let noise_prob = 0.5; // Always potential for noise if systole is high
+        
+        if rng.gen_bool(noise_prob) && noise_scale > 0.05 {
+             let noise = Array1::random_using(self.n, Normal::new(0.0, noise_scale as f64).unwrap(), &mut rng).mapv(|x| x as f32);
+             current_input = &current_input + &noise;
+             self.last_recall_triggered = true; // Treating modulated noise as "recall/exploration"
+        } else {
+
+             self.last_recall_triggered = false;
+        }
+        
+        // 3. Associative Chaining (Momentum)
+        // Add "ghost" of previous output
+        if let Some(ref prev) = self.last_output {
+             current_input = &current_input + &(prev * self.associative_momentum);
+        }
+
+        // 4. Temporal Gating
+        let temporal_input = &current_input * heartbeat;
+
+
+        // 4. Update Rho with Time-Weighted Hebbian Learning
+        
+        // Apply Decay first (Forgetting)
+        // Stronger decay prevents eternal lock-in
+        self.rho_phase[layer] *= self.rho_decay;
+
         // Calculate latent activation (d x 1)
         let latent = self.coupling_strength.dot(&temporal_input);
         
-        // Compute Hebbian update (Outer Product: Latent * Input^T) -> (d x n)
-        // Using insert_axis to create column (d, 1) and row (1, n) vectors for outer product
-        let update = latent.clone().insert_axis(Axis(1)).dot(&temporal_input.clone().insert_axis(Axis(0)));
-        
-        // rho = rho + (update * phase_of_time)
-        let time_encoding = (self.global_time * 0.5).cos(); // A slower "day/night" cycle
-        self.rho_phase[layer] = &self.rho_phase[layer] + &(update * time_encoding);
+        // Calculate Energy for this step (L2 norm of latent)
+        let current_energy = latent.dot(&latent).sqrt();
+        self.energy_history = 0.9 * self.energy_history + 0.1 * current_energy;
 
-        // ... rest of the resonance logic ...
-        // Project back to neuron space (simple sum across latent dimensions for now)
-        self.rho_phase[layer].sum_axis(Axis(0))
+        // Dynamic Self-Feedback Scaling
+        // If energy is high (Active Planning), reduce feedback/update strength lightly
+        // to check "overconfidence" or "attractor lock"
+        let feedback_scale = if self.energy_history > 0.5 { 0.9 } else { 1.0 };
+
+        // Hebbian Update with Clamping
+        // 1. Calculate Hebbian Term
+        let hebbian = latent.clone().insert_axis(Axis(1)).dot(&temporal_input.clone().insert_axis(Axis(0)));
+        
+        // 2. Apply Update + Decay
+        // rho = (rho * decay) + (eta * hebbian * time_encoding)
+        // Scaled by feedback_scale
+        
+        let time_encoding = (self.global_time * 0.5).cos();
+        let eta = self.learning_rate;
+        let decay = self.rho_decay;
+
+        // Apply update in-place
+        let rho = &mut self.rho_phase[layer];
+        // Efficient ndarray operation?
+        // rho = rho * decay + ...
+        // Using explicit loop to combine steps and clamp
+        
+        for i in 0..self.d {
+            for j in 0..self.n {
+                let h = hebbian[[i, j]];
+                let w = rho[[i, j]];
+                
+                let mut new_w = w * decay + (eta * h * time_encoding * feedback_scale);
+                
+                // 3. Stabilization: Dynamic Clamping based on Heartbeat
+                // Systole (High Heartbeat): Relaxed Clamp (3.0) - Exploration
+                // Diastole (Low Heartbeat): Tight Clamp (1.0) - Compression/Settling
+                // heartbeat variable roughly 0.0 to 0.7. Normalize to 0..1 for phase?
+                // self.global_time * freq -> sin. 
+                // Let's use the calc from earlier: (self.global_time * self.heartbeat_freq).sin().abs();
+                let phase_strength = (self.global_time * self.heartbeat_freq).sin().abs();
+                let clamp_limit = 1.0 + (2.0 * phase_strength);
+                
+                new_w = new_w.clamp(-clamp_limit, clamp_limit);
+                
+                rho[[i, j]] = new_w;
+
+
+            }
+        }
+        
+        // Final Output Calculation for Momentum
+        let final_activation = self.rho_phase[layer].sum_axis(Axis(0));
+        self.last_output = Some(final_activation.clone());
+
+        // Project back to neuron space
+        final_activation
     }
+
 }
